@@ -258,8 +258,13 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP)
-        self.geometry("1240x880")
-        self.minsize(1100, 720)
+        # fit the screen it opens on: a small laptop (1280x800, or a Mac's 1024x768 at its
+        # largest text) is smaller than the 1240x880 the app likes, and a minimum size
+        # bigger than the screen pushes the window off its edge and under the Dock
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(1240, sw - 40), min(880, sh - 120)
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, min(40, sh - h - 100))}")
+        self.minsize(min(1100, w), min(720, h))
         try:
             if MAC:                                  # the Dock's icon (a Mac reads no .ico)
                 self.iconphoto(True, tk.PhotoImage(file=str(SCRIPT_DIR / "wwoz.png")))
@@ -484,7 +489,7 @@ class App(tk.Tk):
         t = self.tab_player
         pw = ttk.PanedWindow(t, orient="horizontal")
         pw.pack(fill="both", expand=True, padx=10, pady=(10, 6))
-        self.after(150, lambda: pw.sashpos(0, 400))
+        self.after(150, lambda: pw.sashpos(0, min(400, int(self.winfo_width() * 0.33))))
 
         # ---- library: every recording, grouped; one click plays ----
         lib = ttk.Frame(pw)
