@@ -192,6 +192,12 @@ def find_tool(name):
     p = shutil.which(name)
     if p:
         return p
+    if sys.platform == "darwin":
+        # an app opened from the Finder, or the Sunday job, gets a PATH without Homebrew's
+        for d in ("/opt/homebrew/bin", "/usr/local/bin"):
+            if os.access(f"{d}/{name}", os.X_OK):
+                return f"{d}/{name}"
+        raise ToolError(f"{name} not found. Install with: brew install ffmpeg")
     # winget-installed ffmpeg may not be on PATH in this shell yet
     links = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / f"{name}.exe"
     if links.exists():
@@ -1262,8 +1268,12 @@ def cmd_shazam(args):
 SPLIT_NAME = re.compile(r"^\d+ - .+\.(mp3|m4a|ogg|opus)$", re.I)
 
 
+TRASH = "Recycle Bin" if os.name == "nt" else "Trash"
+
+
 def recycle(paths):
-    """Send files to the Windows Recycle Bin (so a replaced split can be restored)."""
+    """Send files to the Windows Recycle Bin or the Mac's Trash (so a replaced split can
+    be restored)."""
     paths = [str(Path(p).resolve()) for p in paths]
     if not paths:
         return True
@@ -1283,6 +1293,21 @@ def recycle(paths):
         op = SHFILEOPSTRUCTW(None, 3, ctypes.cast(buf, ctypes.c_void_p), None,
                              0x40 | 0x10 | 0x04 | 0x400 | 0x4000, False, None, None)
         return ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) == 0
+    if sys.platform == "darwin":
+        # macOS 15 has a trash command; before it, ask the Finder (macOS asks once whether
+        # the app may). Either way "Put Back" in the Trash restores a file. If neither
+        # works, the files stay where they are and the caller says so.
+        if os.path.exists("/usr/bin/trash"):
+            cmd = ["/usr/bin/trash"] + paths
+        else:
+            script = ["on run argv", "set fs to {}", "repeat with p in argv",
+                      "set end of fs to (POSIX file (contents of p)) as alias", "end repeat",
+                      'tell application "Finder" to delete fs', "end run"]
+            cmd = ["osascript"] + [a for line in script for a in ("-e", line)] + paths
+        try:
+            return subprocess.run(cmd, capture_output=True, timeout=120).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     return False
 
 
@@ -1462,7 +1487,7 @@ def split_pieces(path, lead_in=15, out_dir=None):
     stale = sorted(before - written)           # e.g. the songs of the old song-by-song split
     if stale:
         if recycle([out_dir / n for n in stale]):
-            out(f"  {len(stale)} file(s) from the previous cut moved to the Recycle Bin")
+            out(f"  {len(stale)} file(s) from the previous cut moved to the {TRASH}")
         else:
             out(f"  note: {len(stale)} file(s) from an earlier cut are still in the folder")
     out(f"{len(pieces)} piece(s) in: {out_dir}")
@@ -1575,7 +1600,7 @@ def cmd_split(args):
     stale = sorted(before - written)      # left from an earlier split with other labels
     if stale:
         if recycle([out_dir / n for n in stale]):
-            out(f"\n  {len(stale)} file(s) from the previous split moved to the Recycle Bin")
+            out(f"\n  {len(stale)} file(s) from the previous split moved to the {TRASH}")
         else:
             out(f"\n  note: {len(stale)} file(s) from an earlier split are still in the folder")
     out(f"\nTracks written to: {out_dir}")
@@ -1916,7 +1941,7 @@ def cut_festival(fest, dest_dir=None):
     os.replace(tmp_idx, out_dir / "festival.json")
     stale = sorted(before - written)
     if stale and recycle([out_dir / n for n in stale]):
-        out(f"  {len(stale)} file(s) from an earlier cut moved to the Recycle Bin")
+        out(f"  {len(stale)} file(s) from an earlier cut moved to the {TRASH}")
     out(f"\n{len(written)} set(s) and {len(programs)} WWOZ show(s) written to: {out_dir}")
     return out_dir
 
