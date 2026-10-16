@@ -265,6 +265,7 @@ class App(tk.Tk):
         w, h = min(1240, sw - 40), min(880, sh - 120)
         self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, min(40, sh - h - 100))}")
         self.minsize(min(1100, w), min(720, h))
+        self.compact = h < 760 or w < 1100       # a small screen: trim what can go
         try:
             if MAC:                                  # the Dock's icon (a Mac reads no .ico)
                 self.iconphoto(True, tk.PhotoImage(file=str(SCRIPT_DIR / "wwoz.png")))
@@ -338,7 +339,7 @@ class App(tk.Tk):
         logf.pack(fill="x", side="bottom")
         tk.Label(logf, text="ACTIVITY", background=SLATE, foreground=GOLD_HI, font=FONT_SIGN,
                  anchor="w").pack(fill="x", padx=12, pady=(6, 0))
-        self.log = tk.Text(logf, height=4, wrap="word", state="disabled", relief="flat",
+        self.log = tk.Text(logf, height=2 if self.compact else 4, wrap="word", state="disabled", relief="flat",
                            background=SLATE, foreground=CHALK, insertbackground=CHALK,
                            highlightthickness=0, padx=12, pady=4, font=FONT_LOG)
         self.log.pack(fill="x", padx=0, pady=(0, 8))
@@ -506,8 +507,8 @@ class App(tk.Tk):
         body = ttk.Frame(lib)
         body.pack(fill="both", expand=True)
         self.lib_tree = ttk.Treeview(body, columns=("when",), show="tree", selectmode="browse")
-        self.lib_tree.column("#0", width=190, minwidth=120, stretch=True)
-        self.lib_tree.column("when", width=100, minwidth=80, anchor="e", stretch=False)
+        self.lib_tree.column("#0", width=150 if self.compact else 190, minwidth=120, stretch=True)
+        self.lib_tree.column("when", width=80 if self.compact else 100, minwidth=70, anchor="e", stretch=False)
         ysb = ttk.Scrollbar(body, orient="vertical", command=self.lib_tree.yview)
         self.lib_tree.configure(yscrollcommand=ysb.set)
         self.lib_tree.pack(side="left", fill="both", expand=True)
@@ -547,14 +548,17 @@ class App(tk.Tk):
         ctrl = ttk.Frame(head, style="Panel.TFrame")
         ctrl.grid(row=4, column=0, sticky="w", pady=(12, 0))
         for txt, d in [("◀ 5 min", -300), ("◀ 30 s", -30)]:
-            ttk.Button(ctrl, text=txt, width=8, command=lambda d=d: self.jump(d)).pack(side="left", padx=(0, 4))
+            ttk.Button(ctrl, text=txt, width=7 if self.compact else 8,
+                       command=lambda d=d: self.jump(d)).pack(side="left", padx=(0, 4))
         self.play_btn = ttk.Button(ctrl, text="Play", style="Play.TButton", command=self.toggle_play)
         self.play_btn.pack(side="left", padx=8)
         for txt, d in [("30 s ▶", 30), ("5 min ▶", 300)]:
-            ttk.Button(ctrl, text=txt, width=8, command=lambda d=d: self.jump(d)).pack(side="left", padx=(4, 0))
-        ttk.Label(ctrl, text="Volume", style="Meta.TLabel").pack(side="left", padx=(28, 6))
+            ttk.Button(ctrl, text=txt, width=7 if self.compact else 8,
+                       command=lambda d=d: self.jump(d)).pack(side="left", padx=(4, 0))
+        if not self.compact:
+            ttk.Label(ctrl, text="Volume", style="Meta.TLabel").pack(side="left", padx=(28, 6))
         self.vol = tk.IntVar(value=int(self.state.get("_volume", 90)))
-        ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=110,
+        ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=70 if self.compact else 110,
                   command=lambda v: self.player and
                   self.player.audio_set_volume(int(float(v)))).pack(side="left")
 
@@ -572,7 +576,8 @@ class App(tk.Tk):
         keys = ttk.Label(head, text="Space plays or pauses. The arrow keys skip 30 seconds, or 5 minutes "
                                     f"with Shift. {MOD_NAME}+1 to {MOD_NAME}+5 change pages.",
                          style="PanelHint.TLabel")
-        keys.grid(row=6, column=0, sticky="w", pady=(6, 0))
+        if not self.compact:                     # on a small screen the song list needs the room
+            keys.grid(row=6, column=0, sticky="w", pady=(6, 0))
 
         def rewrap(e):                               # text wraps to the card, whatever its width
             for w in (self.now_lbl, self.sub_lbl, self.about_lbl, keys):
