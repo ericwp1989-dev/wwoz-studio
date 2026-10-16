@@ -1,0 +1,8 @@
+# The festival set finder ("find the sets" in a recording of a whole Jazz Fest day):
+# it listens for the DJs' announcements and transcribes them on this computer. About a
+# 2 GB download (PyTorch). Setup.cmd asks before installing these.
+faster-whisper>=1.2
+silero-vad>=6.2
+numpy>=1.26
+# reading the festival's official schedule PDF (parse_jazzfest_schedule.py)
+pdfplumber>=0.11

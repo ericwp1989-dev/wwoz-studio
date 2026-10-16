@@ -1,0 +1,13 @@
+# Runtime state and caches; not source.
+__pycache__/
+*.pyc
+player_state.json
+wwoz_studio_errors.log
+
+# Each person's own: their favorite shows (the app writes a blank one on first run) and
+# the weekly schedule it downloads from wwoz.org.
+favorites.json
+wwoz_schedule.json
+
+# Superseded pre-move copies, kept on disk until the first push made them redundant.
+*.bak

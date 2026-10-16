@@ -1,0 +1,39 @@
+{
+  "_help": [
+    "A festival WWOZ broadcast live, used to name and cut the archive downloads of that",
+    "broadcast. 'title_match' is part of the archive title of every broadcast show",
+    "(case, accents and punctuation ignored). Times are Central, 24-hour. The two stages",
+    "alternate with no overlap, so WWOZ carried every set."
+  ],
+  "name": "Crescent City Blues & BBQ Festival 2026",
+  "short": "Blues & BBQ Fest 2026",
+  "title_match": "Crescent City Blues and BBQ",
+  "place": "Lafayette Square, New Orleans",
+  "source": "https://www.jazzandheritage.org/events/2026-crescent-city-blues-bbq-festival/ (read 2026-10-16)",
+  "days": {
+    "2026-10-09": [
+      {"start": "17:30", "end": "18:45", "artist": "Johnny Sansone", "stage": "St. Charles Ave. Stage"},
+      {"start": "19:00", "end": "20:30", "artist": "Ruthie Foster", "stage": "St. Charles Ave. Stage"}
+    ],
+    "2026-10-10": [
+      {"start": "11:00", "end": "12:00", "artist": "Washboard Chaz Blues Trio", "stage": "Camp Street Stage"},
+      {"start": "12:00", "end": "13:00", "artist": "All-Star Tribute to Scott Aiges", "stage": "St. Charles Ave. Stage"},
+      {"start": "13:00", "end": "14:00", "artist": "Jimmy \"Duck\" Holmes", "stage": "Camp Street Stage"},
+      {"start": "14:00", "end": "15:15", "artist": "Erica Falls & Vintage Soul", "stage": "St. Charles Ave. Stage"},
+      {"start": "15:15", "end": "16:30", "artist": "Linda Gail Lewis", "stage": "Camp Street Stage"},
+      {"start": "16:30", "end": "17:45", "artist": "The Zac Schulze Gang", "stage": "St. Charles Ave. Stage"},
+      {"start": "17:45", "end": "19:00", "artist": "Cedric Burnside", "stage": "Camp Street Stage"},
+      {"start": "19:00", "end": "20:30", "artist": "Samantha Fish", "stage": "St. Charles Ave. Stage"}
+    ],
+    "2026-10-11": [
+      {"start": "11:00", "end": "12:00", "artist": "Dexter Allen", "stage": "Camp Street Stage"},
+      {"start": "12:00", "end": "13:00", "artist": "Marc Stone", "stage": "St. Charles Ave. Stage"},
+      {"start": "13:00", "end": "14:00", "artist": "Kenny Brown", "stage": "Camp Street Stage"},
+      {"start": "14:00", "end": "15:15", "artist": "Mia Borders", "stage": "St. Charles Ave. Stage"},
+      {"start": "15:15", "end": "16:30", "artist": "Terrance Simien and the Zydeco Experience featuring Marcella Simien", "stage": "Camp Street Stage"},
+      {"start": "16:30", "end": "17:45", "artist": "George Porter Jr. & Runnin' Pardners", "stage": "St. Charles Ave. Stage"},
+      {"start": "17:45", "end": "19:00", "artist": "Little Freddie King", "stage": "Camp Street Stage"},
+      {"start": "19:00", "end": "20:30", "artist": "Booker T. Jones", "stage": "St. Charles Ave. Stage"}
+    ]
+  }
+}

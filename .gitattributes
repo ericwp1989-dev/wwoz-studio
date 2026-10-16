@@ -1,0 +1,16 @@
+# Keep line endings exactly as committed. Without this, a global core.autocrlf
+# rewrites every file on checkout and the next commit shows whole-file diffs
+# that hide the real change — which is precisely what happened while this code
+# was being fixed.
+* text=auto eol=lf
+# ...except Windows scripts, which the command prompt reads most reliably with CRLF
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary
+*.png binary
+*.docx binary
+*.xlsx binary
+*.potx binary
+*.dotx binary
+*.ttf binary
