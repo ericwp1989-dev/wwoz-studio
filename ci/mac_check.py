@@ -74,11 +74,18 @@ def program_checks():
     check("ffmpeg found with the bare PATH an app opened from the Finder gets", bare.returncode == 0,
           (bare.stdout or bare.stderr).strip()[-300:])
     try:
-        import vlc
-        inst = vlc.Instance("--no-video", "--quiet")
-        check("VLC loads", inst is not None, vlc.libvlc_get_version().decode(errors="replace"))
+        import wwoz_player
+        pl = wwoz_player.Player(wwoz.find_tool("ffmpeg"), wwoz.find_tool("ffprobe"))
+        t0 = time.time()
+        while not pl.backend and pl.state != "error" and time.time() - t0 < 15:
+            time.sleep(0.1)
+        ok = bool(pl.backend) and pl.state != "error"
+        # a data center Mac may have no sound output at all: worth knowing, not a fault
+        check("the sound player starts", ok, f"through {pl.backend}" if ok else pl.error,
+              soft=not ok and "sound device" in pl.error)
+        pl.close()
     except Exception as e:
-        check("VLC loads", False, repr(e))
+        check("the sound player starts", False, repr(e))
     try:
         import shazamio  # noqa: F401
         check("Shazam library", True)
@@ -144,7 +151,7 @@ def gui_checks(path):
     W = wwoz_gui
 
     def state():
-        return str(app.player.get_state()).split(".")[-1] if app.player else "no VLC"
+        return app.player.state if app.player else "no player"
 
     def fonts():
         for label in ("FONT", "FONT_TITLE", "FONT_SIGN", "FONT_MAST", "FONT_FLEUR", "FONT_MONO"):
@@ -155,11 +162,11 @@ def gui_checks(path):
         check("library shows the download", str(path) in app.lib_paths, tops)
         shot("1-player")
         app.open_file(path)
-        app.player and app.player.audio_set_volume(0)
+        app.player and app.player.set_volume(0)
 
     def playing():
-        app.player and app.player.audio_set_volume(0)
-        check("plays the show", state() in ("Playing", "Opening", "Buffering"), state(), soft=True)
+        app.player and app.player.set_volume(0)
+        check("plays the show", state() == "playing", state(), soft=True)
         check("header names it", bool(app.now_lbl.cget("text")), app.now_lbl.cget("text"))
         check("its songs are listed", True, f"{len(app.rows)} rows")
         shot("2-player-playing")
@@ -182,7 +189,7 @@ def gui_checks(path):
         app.lib_tree.event_generate("<space>")
 
     def paused():
-        check("Space pauses", state() == "Paused", state(), soft=True)
+        check("Space pauses", state() == "paused", state(), soft=True)
         app.focus_force()
         app.update()
         app.event_generate("<Command-Key-2>")
@@ -214,8 +221,8 @@ def gui_checks(path):
         app.toggle_live()
 
     def live():
-        app.player and app.player.audio_set_volume(0)
-        check("Listen live", state() in ("Playing", "Opening", "Buffering"), state(), soft=True)
+        app.player and app.player.set_volume(0)
+        check("Listen live", state() == "playing", state(), soft=True)
         shot("6-live")
         app.toggle_live()
 
@@ -223,7 +230,7 @@ def gui_checks(path):
         log = W.ERROR_LOG
         check("no errors logged", not log.exists() or log.stat().st_size == 0,
               log.read_text(encoding="utf-8")[-600:] if log.exists() else "")
-        app.player and app.player.stop()
+        app.player and app.player.close()
         app.destroy()
 
     plan = [(2500, fonts), (3500, playing), (1500, paused), (1000, page_keys), (2500, favorites),

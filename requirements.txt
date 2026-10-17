@@ -1,6 +1,7 @@
 # WWOZ Studio: what the player, the archive downloads, the weekly favorites and the
-# Shazam scans need. Setup.cmd installs these for you.
+# Shazam scans need. Setup.cmd installs these for you. (miniaudio plays the sound that
+# ffmpeg reads.)
 requests>=2.31
 tzdata>=2024.1
-python-vlc>=3.0.20
+miniaudio>=1.71
 shazamio>=0.8

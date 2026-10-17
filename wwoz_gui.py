@@ -27,6 +27,7 @@ else:
     SCRIPT_DIR = Path(__file__).resolve().parent
 
 import wwoz  # the CLI module, reused as a library
+import wwoz_player  # the sound: ffmpeg and miniaudio in a helper process
 
 APP = "WWOZ Studio"
 RECORDINGS_DIR = wwoz.RECORDINGS_DIR
@@ -55,6 +56,16 @@ def log_error():
     try:
         with open(ERROR_LOG, "a", encoding="utf-8") as f:
             f.write(f"\n===== {datetime.now():%Y-%m-%d %I:%M:%S %p}\n{traceback.format_exc()}")
+    except OSError:
+        pass
+
+
+def log_line(text):
+    """One line in the error log, for a problem that isn't a crash (such as sound that
+    wouldn't play), so the reason survives after the message box is closed."""
+    try:
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.now():%Y-%m-%d %I:%M:%S %p}\n{text}\n")
     except OSError:
         pass
 
@@ -112,25 +123,6 @@ def wheel_steps(delta):
     if sys.platform == "darwin" and abs(delta) < 120:
         return -delta
     return -int(delta / 120)
-
-
-def point_at_mac_vlc():
-    """python-vlc looks for VLC only in /Applications; also find it in ~/Applications.
-    The library is loaded here first because python-vlc quits the whole program when
-    the one it is pointed at won't load."""
-    import ctypes
-    mac = Path.home() / "Applications" / "VLC.app" / "Contents" / "MacOS"
-    if ("PYTHON_VLC_LIB_PATH" in os.environ or Path("/Applications/VLC.app").exists()
-            or not (mac / "lib" / "libvlc.dylib").exists()):
-        return
-    try:
-        ctypes.CDLL(str(mac / "lib" / "libvlccore.dylib"))
-        ctypes.CDLL(str(mac / "lib" / "libvlc.dylib"))
-    except OSError:
-        return
-    os.environ["PYTHON_VLC_LIB_PATH"] = str(mac / "lib" / "libvlc.dylib")
-    if (mac / "plugins").is_dir():
-        os.environ["PYTHON_VLC_MODULE_PATH"] = str(mac / "plugins")
 
 
 # The French Quarter: plaster-cream walls, wrought-iron black, gas-lamp amber for
@@ -277,8 +269,7 @@ class App(tk.Tk):
         self._slots = None          # weekly schedule slots, read once from wwoz_schedule.json
         self._last_now = None       # song row last scrolled into view
 
-        self.player = None
-        self.vlc_instance = None
+        self.player = None          # wwoz_player.Player, started by _init_player
         self.current_file = None
         self.live = False           # playing WWOZ's live stream rather than a file
         self.rows = []            # tracklist rows (dicts, FIELDS keys)
@@ -307,7 +298,7 @@ class App(tk.Tk):
         self._other_scanner = False    # the Sunday task's scan lock was seen
 
         self._build_ui()
-        self._init_vlc()
+        self._init_player()
         self._bind_keys()
         self.refresh_library()
         self.refresh_shows()
@@ -453,7 +444,7 @@ class App(tk.Tk):
     def toggle_live(self):
         """Play WWOZ's live stream (or stop it)."""
         if not self.player:
-            messagebox.showinfo(APP, "Playback needs VLC media player.")
+            messagebox.showinfo(APP, "The sound player isn't running, so nothing can play.")
             return
         if self.live:
             self.player.stop()
@@ -477,8 +468,8 @@ class App(tk.Tk):
         self.about_lbl.grid_remove()
         self.resume_btn.grid_remove()
         self.title(f"WWOZ live - {APP}")
-        self.player.set_media(self.vlc_instance.media_new(wwoz.STREAM_URL))
-        self.player.play()
+        self.player.open_stream(wwoz.STREAM_URL)
+        self.after(2500, self._check_playback)
         self.play_btn.config(text="Pause")
         self.pos_var.set(0)
         self.time_lbl.config(text="LIVE")
@@ -560,7 +551,7 @@ class App(tk.Tk):
         self.vol = tk.IntVar(value=int(self.state.get("_volume", 90)))
         ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=70 if self.compact else 110,
                   command=lambda v: self.player and
-                  self.player.audio_set_volume(int(float(v)))).pack(side="left")
+                  self.player.set_volume(float(v) / 100)).pack(side="left")
 
         seekf = ttk.Frame(head, style="Panel.TFrame")
         seekf.grid(row=5, column=0, sticky="ew", pady=(10, 0))
@@ -641,7 +632,7 @@ class App(tk.Tk):
         m.delete(0, "end")
         if not self.current_file:
             return
-        sec = int(self.player.get_time() / 1000) if self.player else 0
+        sec = int(self.player.position) if self.player else 0
         m.add_command(label=f"Mark a set or song starting now ({fmt(sec)})...", command=self.add_marker)
         if iid:
             m.add_command(label="Rename this row...", command=self.edit_marker)
@@ -924,8 +915,8 @@ class App(tk.Tk):
             messagebox.showinfo(APP, "That set's time isn't inside the open recording.\n"
                                      "(Open the recording from that day first.)")
             return
-        self.player.set_time(off * 1000)
-        if not self.player.is_playing():
+        self.player.seek(off)
+        if not self.player.is_playing:
             self.toggle_play()
 
     def _guide_insert(self, all_jazz_tent):
@@ -1437,20 +1428,42 @@ class App(tk.Tk):
 
     # -------------------------------------------------------------- player --
 
-    def _init_vlc(self):
+    def _init_player(self):
+        """Start the sound player: ffmpeg reads, miniaudio plays, in a helper process of
+        its own (wwoz_player.py), so the app's own work can't make the sound skip."""
         try:
-            if MAC:
-                point_at_mac_vlc()
-            import vlc
-            self.vlc_instance = vlc.Instance("--no-video", "--quiet")
-            if self.vlc_instance is None:
-                raise RuntimeError("libvlc refused to start (Instance is None)")
-            self.player = self.vlc_instance.media_player_new()
-            self.player.audio_set_volume(self.vol.get())
-            self.logln(f"audio engine ready (VLC {vlc.libvlc_get_version().decode(errors='replace')})")
+            self._player_errors = open(ERROR_LOG, "a", encoding="utf-8")   # the helper's own errors
+        except OSError:
+            self._player_errors = None
+        try:
+            self.player = wwoz_player.Player(wwoz.find_tool("ffmpeg"), wwoz.find_tool("ffprobe"),
+                                             errors=self._player_errors)
+            self.player.set_volume(self.vol.get() / 100)
         except Exception as e:
-            messagebox.showerror(APP, "VLC not found — install VLC media player "
-                                      f"to enable playback.\n\n{e}")
+            self.player = None
+            messagebox.showerror(APP, f"The sound player couldn't start, so recordings won't play.\n\n{e}")
+            return
+        self.after(1500, self._player_ready)
+
+    def _player_ready(self, tries=0, said=""):
+        """Say when the sound player is ready. If the speakers won't open yet (asleep,
+        unplugged, busy), the player keeps trying on its own, so this only notes it and
+        looks again; a box appears only when something needs doing (a missing package),
+        or later if a recording won't play."""
+        p = self.player
+        if not p:
+            return
+        if p.backend:
+            self.logln(f"sound player ready (ffmpeg and miniaudio, through {p.backend})")
+            return
+        if p.state == "error" and p.error and p.error != said:
+            self.logln(f"sound player: {p.error}")
+            said = p.error
+            if "isn't installed" in p.error:
+                messagebox.showerror(APP, f"Recordings can't play yet.\n\n{p.error}")
+                return
+        if tries < 60:                                   # keep looking for two minutes
+            self.after(2000, lambda: self._player_ready(tries + 1, said))
 
     def open_file(self, path: Path, resume=False):
         """Play a recording from the top (or from the saved position when resume=True)
@@ -1483,18 +1496,15 @@ class App(tk.Tk):
                 self.logln(f"Jazz Fest Guide loaded for {day} — see the Guide tab")
         saved = self.state.get(str(path), 0)
         if self.player:
-            media = self.vlc_instance.media_new(str(path))
-            self.player.set_media(media)
-            rc = self.player.play()
+            start = saved if resume and saved > 20 else 0
+            self.player.open(path, start=start)
             self.play_btn.config(text="Pause")
-            self.logln(f"playing {info['title']}" + ("" if rc == 0 else f" (play rc={rc})"))
-            self.after(900, lambda: self.player.audio_set_volume(self.vol.get()))
+            self.logln(f"playing {info['title']}")
             self.after(1500, self._check_playback)
-            if resume and saved > 20:
-                self.after(600, lambda: self.player.set_time(int(saved * 1000)))
+            if start:
                 self.logln(f"resumed at {fmt(saved)}")
         else:
-            self.logln("VLC player not available — playback disabled (tracklist still works)")
+            self.logln("the sound player isn't running, so this can't play (its song list still shows)")
         if saved > 20 and not resume:
             self.resume_btn.config(text=f"Resume where you left off ({fmt(saved)}) ›")
             self.resume_btn.grid()
@@ -1506,32 +1516,35 @@ class App(tk.Tk):
             self.open_file(self.current_file, resume=True)
 
     def _check_playback(self):
-        if not (self.player and self.current_file):
+        if not (self.player and (self.current_file or self.live)):
             return
-        import vlc
-        st = self.player.get_state()
-        if st in (vlc.State.Error, vlc.State.Ended) and self.player.get_time() <= 0:
-            self.logln(f"playback problem: VLC state is {st} for {self.current_file.name}")
-            messagebox.showerror(APP, f"VLC couldn't play this file (state: {st}).\n"
-                                      "Try opening it in the VLC app itself — if it plays there, "
-                                      "tell Claude what happened here.")
+        if self.player.state == "error":
+            what = "The live stream" if self.live else "This recording"
+            self.logln(f"playback problem with {'the live stream' if self.live else self.current_file.name}: "
+                       f"{self.player.error}")
+            log_line(f"playback problem: {self.player.error}")
+            err = self.player.error
+            messagebox.showerror(APP, f"{what} wouldn't play.\n\n{err[:1].upper()}{err[1:]}")
 
     def toggle_play(self):
         if not (self.player and (self.current_file or self.live)):
             return
-        if self.player.is_playing():
+        if self.player.is_playing:
             self.player.stop() if self.live else self.player.pause()   # a live stream can't pause
             self.play_btn.config(text="Play")
         else:
-            self.player.play()
+            if self.live and self.player.state == "stopped":
+                self.player.open_stream(wwoz.STREAM_URL)               # start it again
+            else:
+                self.player.play()
             self.play_btn.config(text="Pause")
 
     def jump(self, delta):
         if self.player and self.current_file:
-            t = self.player.get_time() / 1000 + delta
+            t = self.player.position + delta
             if self.duration:
                 t = min(t, self.duration - 1)
-            self.player.set_time(int(max(0, t) * 1000))
+            self.player.seek(max(0, t))
 
     def _bind_keys(self):
         """Space plays or pauses; the arrows skip 30 s (5 min with Shift). Typing in a
@@ -1577,7 +1590,7 @@ class App(tk.Tk):
     def _seek_release(self, _e):
         self.seeking = False
         if self.player and self.duration and self.current_file:
-            self.player.set_time(int(self.pos_var.get() / 1000 * self.duration * 1000))
+            self.player.seek(self.pos_var.get() / 1000 * self.duration)
         return "break"
 
     def _focused_row(self):
@@ -1595,20 +1608,18 @@ class App(tk.Tk):
         row = self._focused_row()
         if row is None or not (self.player and self.current_file):
             return
-        self.player.set_time(int(row["offset_seconds"]) * 1000)
-        if not self.player.is_playing():
+        self.player.seek(int(row["offset_seconds"]))
+        if not self.player.is_playing:
             self.toggle_play()
 
     def _tick(self):
         if self.player and (self.current_file or self.live):
-            # keep the button honest when VLC pauses or reaches the end on its own
-            st = str(self.player.get_state())
-            want = "Pause" if st.endswith("Playing") or st.endswith("Opening") or st.endswith("Buffering") \
-                else "Play" if st.endswith(("Paused", "Stopped", "Ended", "Error")) else None
-            if want and self.play_btn.cget("text") != want:
+            # keep the button honest when the player stops or reaches the end on its own
+            want = "Pause" if self.player.is_playing else "Play"
+            if self.play_btn.cget("text") != want:
                 self.play_btn.config(text=want)
         if self.player and self.current_file and self.duration and not self.seeking:
-            sec = max(0, self.player.get_time() / 1000)
+            sec = max(0, self.player.position)
             self.pos_var.set(sec / self.duration * 1000)
             self.time_lbl.config(text=f"{fmt(sec)} / {fmt(self.duration)}")
             if int(sec) % 10 == 0 and sec > 30:
@@ -1668,7 +1679,7 @@ class App(tk.Tk):
     def add_marker(self):
         if not self.current_file:
             return
-        sec = int(self.player.get_time() / 1000) if self.player else 0
+        sec = int(self.player.position) if self.player else 0
         text = simpledialog.askstring(
             APP, f"What starts at {fmt(sec)}?\n\nType the artist for a set, or artist - song for a song.")
         if not text or not text.strip():
@@ -2100,7 +2111,7 @@ class App(tk.Tk):
             if files and key not in self._job_done and (not idx.exists() or newest > idx.stat().st_mtime + 2):
                 return (f"cutting the {fest.get('short') or fest['name']} into sets",
                         lambda f=fest: (wwoz.mark_festival(f), wwoz.cut_festival(f)), key)
-        if (now >= self.scan_resume_at and not (self.player and self.player.is_playing())
+        if (now >= self.scan_resume_at and not (self.player and self.player.is_playing)
                 and arch.exists()):
             for p in wwoz.pending_downloads(arch):
                 key = (str(p), "shazam")
@@ -2232,12 +2243,12 @@ class App(tk.Tk):
         if self.scan_now:
             wwoz.shazam_lock(self.scan_now).unlink(missing_ok=True)
         if self.player and self.current_file:
-            sec = self.player.get_time() / 1000
+            sec = self.player.position
             if sec > 30:
                 self.state[str(self.current_file)] = int(sec)
         save_state(self.state)
         if self.player:
-            self.player.stop()
+            self.player.close()                      # the sound helper ends with the app
         self.destroy()
 
 
