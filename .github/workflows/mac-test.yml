@@ -1,0 +1,75 @@
+# Tries WWOZ Studio on GitHub's Macs: runs Setup (Mac).command the way a double-click
+# does, checks the program and its window (ci/mac_check.py), opens the app the way the
+# Finder does, and keeps screenshots and logs as a downloadable "artifact" of the run.
+name: Mac test
+
+on:
+  push:
+    branches: [mac-test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-14]     # macOS 15 has a trash command; 14 goes through the Finder
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Setup (Mac).command, answering every question with its default
+        run: |
+          set -o pipefail
+          mkdir -p out
+          ./"Setup (Mac).command" < /dev/null 2>&1 | tee out/setup-first-run.log
+
+      - name: Run it again (it should find everything)
+        run: |
+          set -o pipefail
+          ./"Setup (Mac).command" < /dev/null 2>&1 | tee out/setup-second-run.log
+
+      - name: What Setup made
+        continue-on-error: true
+        run: |
+          set -x
+          ls -la "$HOME/Applications/WWOZ Studio.app/Contents/MacOS" "$HOME/Applications/WWOZ Studio.app/Contents/Resources"
+          cat "$HOME/Applications/WWOZ Studio.app/Contents/MacOS/wwoz-studio"
+          plutil -lint "$HOME/Applications/WWOZ Studio.app/Contents/Info.plist"
+          ls -la "$HOME/Desktop" | grep -i wwoz
+          plutil -lint "$HOME/Library/LaunchAgents/local.wwoz-studio.weekly.plist"
+          launchctl print "gui/$(id -u)/local.wwoz-studio.weekly" | head -30
+
+      - name: Check the program and its window
+        run: |
+          export WWOZ_DATA="$RUNNER_TEMP/data" WWOZ_RECORDINGS="$RUNNER_TEMP/recordings"
+          "$HOME/Library/Application Support/WWOZ Studio/python/bin/python" ci/mac_check.py out 2>&1 | tee out/checks.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Open the app the way the Finder does
+        if: always()
+        run: |
+          open "$HOME/Applications/WWOZ Studio.app"
+          sleep 30
+          screencapture -x out/7-app-opened-from-finder.png || true
+          pgrep -fl wwoz_gui.py | tee out/app-process.txt || echo "the app is not running" | tee out/app-process.txt
+          cp "$HOME/Documents/WWOZ Studio/wwoz_studio_errors.log" out/app-errors.log 2>/dev/null || echo "(no error log)"
+          pkill -f wwoz_gui.py || true
+
+      - name: Summary
+        if: always()
+        run: python3 ci/mac_check.py out --summary >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-test-${{ matrix.os }}
+          path: out/

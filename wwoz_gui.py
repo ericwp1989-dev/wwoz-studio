@@ -90,6 +90,49 @@ def archive_dir():
     return wwoz.download_dir_from_config(wwoz.load_config())
 
 
+def open_folder(folder):
+    """Open a folder in File Explorer, or in the Finder on a Mac."""
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(folder)])
+    else:
+        os.startfile(folder)
+
+
+def show_in_folder(path):
+    """Open the folder a file is in with the file selected."""
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        subprocess.Popen(["explorer", "/select,", str(path)])
+
+
+def wheel_steps(delta):
+    """Lines to scroll for a mouse-wheel event: Windows counts 120 to a notch of the
+    wheel, while a Mac sends the steps themselves (1, 2, 3...)."""
+    if sys.platform == "darwin" and abs(delta) < 120:
+        return -delta
+    return -int(delta / 120)
+
+
+def point_at_mac_vlc():
+    """python-vlc looks for VLC only in /Applications; also find it in ~/Applications.
+    The library is loaded here first because python-vlc quits the whole program when
+    the one it is pointed at won't load."""
+    import ctypes
+    mac = Path.home() / "Applications" / "VLC.app" / "Contents" / "MacOS"
+    if ("PYTHON_VLC_LIB_PATH" in os.environ or Path("/Applications/VLC.app").exists()
+            or not (mac / "lib" / "libvlc.dylib").exists()):
+        return
+    try:
+        ctypes.CDLL(str(mac / "lib" / "libvlccore.dylib"))
+        ctypes.CDLL(str(mac / "lib" / "libvlc.dylib"))
+    except OSError:
+        return
+    os.environ["PYTHON_VLC_LIB_PATH"] = str(mac / "lib" / "libvlc.dylib")
+    if (mac / "plugins").is_dir():
+        os.environ["PYTHON_VLC_MODULE_PATH"] = str(mac / "plugins")
+
+
 # The French Quarter: plaster-cream walls, wrought-iron black, gas-lamp amber for
 # what is playing, and the Mardi Gras purple, green and gold for everything you can
 # act on. Headings are set like the street names inlaid in the sidewalk tiles.
@@ -100,10 +143,25 @@ GREEN, GOLD, GOLD_HI = "#1f6b45", "#c9971c", "#e2b545"
 TILE = "#1f4e8c"                                     # sidewalk-tile blue
 BRASS, BRASS_BG, VIOLET, SEL = "#9a6a12", "#f8e2a8", PURPLE, "#ece1f2"
 SLATE, CHALK = "#2c3631", "#e8e3d4"                  # the po-boy shop chalkboard
-FONT, FONT_B, FONT_SM = ("Segoe UI", 10), ("Segoe UI Semibold", 10), ("Segoe UI", 9)
-FONT_TITLE, FONT_MONO = ("Georgia", 17, "bold"), ("Consolas", 10)
-FONT_SIGN = ("Copperplate Gothic Bold", 9)           # engraved-sign capitals for headings
-FONT_MAST = ("Bodoni MT Black", 21)
+MAC = sys.platform == "darwin"
+if MAC:
+    # the same faces from the Mac's own fonts, a third larger: Tk on a Mac counts 72
+    # points to the inch where Windows counts 96, so this keeps the sizes on screen
+    FONT, FONT_B, FONT_SM = ("Helvetica Neue", 13), ("Helvetica Neue", 13, "bold"), ("Helvetica Neue", 12)
+    FONT_SM_B, FONT_PLAY, FONT_HEAD = ("Helvetica Neue", 12, "bold"), ("Helvetica Neue", 15, "bold"), \
+        ("Helvetica Neue", 12, "bold")
+    FONT_TITLE, FONT_MONO, FONT_LOG = ("Georgia", 23, "bold"), ("Menlo", 13), ("Menlo", 12)
+    FONT_SIGN, FONT_SIGN_LT = ("Copperplate", 12, "bold"), ("Copperplate", 12)
+    FONT_MAST, FONT_FLEUR, FONT_AIR = ("Bodoni 72", 28, "bold"), ("Apple Symbols", 37), ("Georgia", 15)
+else:
+    FONT, FONT_B, FONT_SM = ("Segoe UI", 10), ("Segoe UI Semibold", 10), ("Segoe UI", 9)
+    FONT_SM_B, FONT_PLAY, FONT_HEAD = ("Segoe UI", 9, "bold"), ("Segoe UI Semibold", 11), \
+        ("Segoe UI Semibold", 9)
+    FONT_TITLE, FONT_MONO, FONT_LOG = ("Georgia", 17, "bold"), ("Consolas", 10), ("Consolas", 9)
+    FONT_SIGN = ("Copperplate Gothic Bold", 9)           # engraved-sign capitals for headings
+    FONT_SIGN_LT = ("Copperplate Gothic Light", 9)
+    FONT_MAST, FONT_FLEUR, FONT_AIR = ("Bodoni MT Black", 21), ("Segoe UI Symbol", 28), ("Georgia", 11)
+MOD, MOD_NAME = ("Command", "Command") if MAC else ("Control", "Ctrl")   # page keys, picking several
 NAV = [("Player", "tab_player"), ("Shows", "tab_shows"), ("Jazz Fest Guide", "tab_guide"),
        ("WWOZ Archive", "tab_archive"), ("Weekly Favorites", "tab_fav")]
 
@@ -128,7 +186,7 @@ def apply_style(root):
     st.configure("TButton", padding=(10, 4), background=PANEL, bordercolor=LINE,
                  lightcolor=PANEL, darkcolor=LINE)
     st.map("TButton", background=[("active", SEL), ("pressed", LINE)])
-    st.configure("Play.TButton", font=("Segoe UI Semibold", 11), padding=(26, 7), background=PURPLE,
+    st.configure("Play.TButton", font=FONT_PLAY, padding=(26, 7), background=PURPLE,
                  foreground="#ffffff", bordercolor=PURPLE_LO, lightcolor=PURPLE_HI, darkcolor=PURPLE_LO)
     st.map("Play.TButton", background=[("active", PURPLE_HI), ("pressed", PURPLE_LO)],
            foreground=[("active", "#ffffff"), ("pressed", "#ffffff")])
@@ -151,7 +209,7 @@ def apply_style(root):
     st.configure("Bare.TNotebook", background=BG, borderwidth=0, tabmargins=0)
     st.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=INK, rowheight=27,
                  bordercolor=LINE, lightcolor=PANEL, darkcolor=LINE, font=FONT)
-    st.configure("Treeview.Heading", background="#efe4d0", foreground=TILE, font=("Segoe UI Semibold", 9),
+    st.configure("Treeview.Heading", background="#efe4d0", foreground=TILE, font=FONT_HEAD,
                  bordercolor=LINE, relief="flat", padding=(6, 5))
     st.map("Treeview.Heading", background=[("active", "#e8dbc3")])
     st.map("Treeview", background=[("selected", SEL)], foreground=[("selected", INK)])
@@ -200,10 +258,19 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP)
-        self.geometry("1240x880")
-        self.minsize(1100, 720)
+        # fit the screen it opens on: a small laptop (1280x800, or a Mac's 1024x768 at its
+        # largest text) is smaller than the 1240x880 the app likes, and a minimum size
+        # bigger than the screen pushes the window off its edge and under the Dock
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(1240, sw - 40), min(880, sh - 120)
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, min(40, sh - h - 100))}")
+        self.minsize(min(1100, w), min(720, h))
+        self.compact = h < 760 or w < 1100       # a small screen: trim what can go
         try:
-            self.iconbitmap(str(SCRIPT_DIR / "wwoz.ico"))
+            if MAC:                                  # the Dock's icon (a Mac reads no .ico)
+                self.iconphoto(True, tk.PhotoImage(file=str(SCRIPT_DIR / "wwoz.png")))
+            else:
+                self.iconbitmap(str(SCRIPT_DIR / "wwoz.ico"))
         except tk.TclError:
             pass
         apply_style(self)
@@ -247,6 +314,8 @@ class App(tk.Tk):
         self.after(400, self._tick)
         self.after(200, self._drain_log)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if MAC:                                      # Command-Q too, not only the red button
+            self.createcommand("::tk::mac::Quit", self._on_close)
         threading.Thread(target=self._job_worker, daemon=True).start()
         self.after(3000, self._refresh_stale_schedule)
 
@@ -270,9 +339,9 @@ class App(tk.Tk):
         logf.pack(fill="x", side="bottom")
         tk.Label(logf, text="ACTIVITY", background=SLATE, foreground=GOLD_HI, font=FONT_SIGN,
                  anchor="w").pack(fill="x", padx=12, pady=(6, 0))
-        self.log = tk.Text(logf, height=4, wrap="word", state="disabled", relief="flat",
+        self.log = tk.Text(logf, height=2 if self.compact else 4, wrap="word", state="disabled", relief="flat",
                            background=SLATE, foreground=CHALK, insertbackground=CHALK,
-                           highlightthickness=0, padx=12, pady=4, font=("Consolas", 9))
+                           highlightthickness=0, padx=12, pady=4, font=FONT_LOG)
         self.log.pack(fill="x", padx=0, pady=(0, 8))
         nb.pack(fill="both", expand=True, pady=(4, 0))
 
@@ -293,13 +362,13 @@ class App(tk.Tk):
         top = tk.Frame(band, background=IRON)
         top.pack(fill="x", padx=18, pady=(10, 0))
         tk.Label(top, text="⚜", background=IRON, foreground=GOLD,
-                 font=("Segoe UI Symbol", 28)).pack(side="left")
+                 font=FONT_FLEUR).pack(side="left")
         name = tk.Frame(top, background=IRON)
         name.pack(side="left", padx=(8, 0))
         tk.Label(name, text="WWOZ Studio", background=IRON, foreground=CREAM,
                  font=FONT_MAST).pack(anchor="w")
         tk.Label(name, text="90.7 FM    NEW ORLEANS", background=IRON, foreground=GOLD,
-                 font=("Copperplate Gothic Light", 9)).pack(anchor="w", padx=(2, 0))
+                 font=FONT_SIGN_LT).pack(anchor="w", padx=(2, 0))
 
         air = tk.Frame(top, background=IRON)
         air.pack(side="right")
@@ -315,7 +384,7 @@ class App(tk.Tk):
         txt.pack(side="right", padx=(0, 16))
         tk.Label(txt, text="ON THE AIR NOW", background=IRON, foreground=GOLD,
                  font=FONT_SIGN).pack(anchor="e")
-        self.air_lbl = tk.Label(txt, text="", background=IRON, foreground=CREAM, font=("Georgia", 11))
+        self.air_lbl = tk.Label(txt, text="", background=IRON, foreground=CREAM, font=FONT_AIR)
         self.air_lbl.pack(anchor="e")
         self.air_sub = tk.Label(txt, text="", background=IRON, foreground="#b3a796", font=FONT_SM)
         self.air_sub.pack(anchor="e")
@@ -337,7 +406,7 @@ class App(tk.Tk):
                 w.bind("<Enter>", lambda e, k=i: self._draw_nav(hover=k))
                 w.bind("<Leave>", lambda e: self._draw_nav())
             self.nav_items.append((attr, lbl, bar))
-            self.bind_all(f"<Control-Key-{i + 1}>", lambda e, a=attr: self.nb.select(getattr(self, a)))
+            self.bind_all(f"<{MOD}-Key-{i + 1}>", lambda e, a=attr: self.nb.select(getattr(self, a)))
 
         stripe = tk.Canvas(band, height=5, background=IRON, highlightthickness=0)
         stripe.pack(fill="x")
@@ -421,7 +490,7 @@ class App(tk.Tk):
         t = self.tab_player
         pw = ttk.PanedWindow(t, orient="horizontal")
         pw.pack(fill="both", expand=True, padx=10, pady=(10, 6))
-        self.after(150, lambda: pw.sashpos(0, 400))
+        self.after(150, lambda: pw.sashpos(0, min(400, int(self.winfo_width() * 0.33))))
 
         # ---- library: every recording, grouped; one click plays ----
         lib = ttk.Frame(pw)
@@ -438,8 +507,8 @@ class App(tk.Tk):
         body = ttk.Frame(lib)
         body.pack(fill="both", expand=True)
         self.lib_tree = ttk.Treeview(body, columns=("when",), show="tree", selectmode="browse")
-        self.lib_tree.column("#0", width=190, minwidth=120, stretch=True)
-        self.lib_tree.column("when", width=100, minwidth=80, anchor="e", stretch=False)
+        self.lib_tree.column("#0", width=150 if self.compact else 190, minwidth=120, stretch=True)
+        self.lib_tree.column("when", width=80 if self.compact else 100, minwidth=70, anchor="e", stretch=False)
         ysb = ttk.Scrollbar(body, orient="vertical", command=self.lib_tree.yview)
         self.lib_tree.configure(yscrollcommand=ysb.set)
         self.lib_tree.pack(side="left", fill="both", expand=True)
@@ -479,14 +548,17 @@ class App(tk.Tk):
         ctrl = ttk.Frame(head, style="Panel.TFrame")
         ctrl.grid(row=4, column=0, sticky="w", pady=(12, 0))
         for txt, d in [("◀ 5 min", -300), ("◀ 30 s", -30)]:
-            ttk.Button(ctrl, text=txt, width=8, command=lambda d=d: self.jump(d)).pack(side="left", padx=(0, 4))
+            ttk.Button(ctrl, text=txt, width=7 if self.compact else 8,
+                       command=lambda d=d: self.jump(d)).pack(side="left", padx=(0, 4))
         self.play_btn = ttk.Button(ctrl, text="Play", style="Play.TButton", command=self.toggle_play)
         self.play_btn.pack(side="left", padx=8)
         for txt, d in [("30 s ▶", 30), ("5 min ▶", 300)]:
-            ttk.Button(ctrl, text=txt, width=8, command=lambda d=d: self.jump(d)).pack(side="left", padx=(4, 0))
-        ttk.Label(ctrl, text="Volume", style="Meta.TLabel").pack(side="left", padx=(28, 6))
+            ttk.Button(ctrl, text=txt, width=7 if self.compact else 8,
+                       command=lambda d=d: self.jump(d)).pack(side="left", padx=(4, 0))
+        if not self.compact:
+            ttk.Label(ctrl, text="Volume", style="Meta.TLabel").pack(side="left", padx=(28, 6))
         self.vol = tk.IntVar(value=int(self.state.get("_volume", 90)))
-        ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=110,
+        ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=70 if self.compact else 110,
                   command=lambda v: self.player and
                   self.player.audio_set_volume(int(float(v)))).pack(side="left")
 
@@ -502,8 +574,10 @@ class App(tk.Tk):
         self.time_lbl = ttk.Label(seekf, text="0:00:00 / 0:00:00", style="Panel.TLabel", font=FONT_MONO)
         self.time_lbl.pack(side="left", padx=(12, 0))
         keys = ttk.Label(head, text="Space plays or pauses. The arrow keys skip 30 seconds, or 5 minutes "
-                                    "with Shift. Ctrl+1 to Ctrl+5 change pages.", style="PanelHint.TLabel")
-        keys.grid(row=6, column=0, sticky="w", pady=(6, 0))
+                                    f"with Shift. {MOD_NAME}+1 to {MOD_NAME}+5 change pages.",
+                         style="PanelHint.TLabel")
+        if not self.compact:                     # on a small screen the song list needs the room
+            keys.grid(row=6, column=0, sticky="w", pady=(6, 0))
 
         def rewrap(e):                               # text wraps to the card, whatever its width
             for w in (self.now_lbl, self.sub_lbl, self.about_lbl, keys):
@@ -550,9 +624,13 @@ class App(tk.Tk):
 
         # right-click menus: fixing a name in the song list, and the rare redo in the library
         self.row_menu = tk.Menu(self, tearoff=0)
-        self.tree.bind("<Button-3>", self._row_menu)
         self.lib_menu = tk.Menu(self, tearoff=0)
-        self.lib_tree.bind("<Button-3>", self._lib_menu)
+        # a Mac's Tk 8.6 calls the right button 2 (later Tks call it 3), and Control-click
+        # is the right-click of a one-button mouse
+        clicks = ("<Button-2>", "<Button-3>", "<Control-Button-1>") if MAC else ("<Button-3>",)
+        for click in clicks:
+            self.tree.bind(click, self._row_menu)
+            self.lib_tree.bind(click, self._lib_menu)
 
     def _row_menu(self, e):
         iid = self.tree.identify_row(e.y)
@@ -579,8 +657,7 @@ class App(tk.Tk):
         self.lib_tree.selection_set(iid)
         m = self.lib_menu
         m.delete(0, "end")
-        m.add_command(label="Show the file in its folder", command=lambda: subprocess.Popen(
-            ["explorer", "/select,", str(p)]))
+        m.add_command(label="Show the file in its folder", command=lambda: show_in_folder(p))
         it = self._items.get(p, {})
         if wwoz.recording_start(p) and it.get("kind") != "set":
             m.add_command(label="Get the DJs' song list again", command=lambda: self._redo(p, "tracklist"))
@@ -723,7 +800,7 @@ class App(tk.Tk):
     def _show_explore(self):
         e = self._show_sel()
         if e:
-            subprocess.Popen(["explorer", "/select,", str(e["path"])])
+            show_in_folder(e["path"])
 
     def _show_rename(self):
         e = self._show_sel()
@@ -891,10 +968,10 @@ class App(tk.Tk):
         self.rec_btn.pack(side="left", padx=20)
         self.rec_stop = None
         ttk.Button(top, text="Open downloads folder",
-                   command=lambda: os.startfile(archive_dir())).pack(side="left")
+                   command=lambda: open_folder(archive_dir())).pack(side="left")
         ttk.Button(top, text="Recordings folder...", command=self.choose_recordings_dir).pack(side="left", padx=6)
         ttk.Label(t, text="Everything WWOZ keeps on demand (two weeks). Select one or more shows "
-                          "(Ctrl or Shift to pick several) and click Download; a check mark means you "
+                          f"({MOD_NAME} or Shift to pick several) and click Download; a check mark means you "
                           "have it. Festival broadcasts are cut into sets automatically.",
                   style="Hint.TLabel").pack(anchor="w", padx=10, pady=(0, 4))
 
@@ -916,7 +993,8 @@ class App(tk.Tk):
         t = self.tab_fav
         ttk.Label(t, text="WEEKLY FAVORITES", style="Section.TLabel").pack(anchor="w", padx=10, pady=(8, 0))
         ttk.Label(t, text="WWOZ's whole weekly schedule, in Central time. Check the shows you love: every "
-                          "Sunday at 9 AM Windows downloads their new episodes. Click a show's name to read "
+                          f"Sunday at 9 AM {'your Mac' if MAC else 'Windows'} downloads their new episodes. "
+                          "Click a show's name to read "
                           "about it and what it plays. \"Download an episode\" grabs one right now.",
                   style="Hint.TLabel", justify="left", wraplength=1120).pack(anchor="w", padx=10, pady=(0, 8))
         bf = ttk.Frame(t)
@@ -945,7 +1023,7 @@ class App(tk.Tk):
         # wheel-scroll while the pointer is over the list (Windows sends the event to the
         # focused widget, so bind globally only while hovering)
         self.fav_canvas.bind("<Enter>", lambda e: self.fav_canvas.bind_all(
-            "<MouseWheel>", lambda ev: self.fav_canvas.yview_scroll(-int(ev.delta / 120), "units")))
+            "<MouseWheel>", lambda ev: self.fav_canvas.yview_scroll(wheel_steps(ev.delta), "units")))
         self.fav_canvas.bind("<Leave>", lambda e: self.fav_canvas.unbind_all("<MouseWheel>"))
 
         about = ttk.LabelFrame(t, text="About this show")
@@ -1361,6 +1439,8 @@ class App(tk.Tk):
 
     def _init_vlc(self):
         try:
+            if MAC:
+                point_at_mac_vlc()
             import vlc
             self.vlc_instance = vlc.Instance("--no-video", "--quiet")
             if self.vlc_instance is None:
@@ -1807,7 +1887,7 @@ class App(tk.Tk):
                   and not any(wwoz.loose(f.get("match")) == wwoz.loose(s["title"]) for s in slots)]
         if custom:
             ttk.Label(self.fav_frame, text="ADDED BY NAME (matches part of a title)",
-                      font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 2))
+                      font=FONT_SM_B).pack(anchor="w", pady=(10, 2))
             for f in custom:
                 self._fav_row(self.fav_frame, f"{'':>8}   {'':<8}   {f['match']}",
                               tk.BooleanVar(value=bool(f.get("enabled"))), "custom", f["match"])
@@ -2080,9 +2160,12 @@ class App(tk.Tk):
     def _run_autocut(self, p):
         """Auto-detect in its own process at low priority, so the app stays quick."""
         cmd = [sys.executable, str(SCRIPT_DIR / "wwoz.py"), "autocut", str(p)]
+        if os.name == "nt":
+            low = {"creationflags": wwoz.NOWIN | 0x4000}               # BELOW_NORMAL_PRIORITY_CLASS
+        else:
+            cmd, low = ["nice", "-n", "10"] + cmd, {}
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                encoding="utf-8", errors="replace", cwd=str(SCRIPT_DIR),
-                                creationflags=wwoz.NOWIN | 0x4000)      # BELOW_NORMAL_PRIORITY_CLASS
+                                encoding="utf-8", errors="replace", cwd=str(SCRIPT_DIR), **low)
         self._job_proc = proc
         for line in proc.stdout:
             if line.strip():

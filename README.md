@@ -4,12 +4,12 @@ A desktop app for listening to [WWOZ](https://www.wwoz.org), New Orleans' commun
 station, on your own schedule. It downloads shows from WWOZ's two-week archive (and your
 favorite shows every week on its own), lists the songs in each one from the DJs' logs and
 Shazam, records the live stream, and cuts recordings of festival broadcasts such as Jazz
-Fest into one file per set. For Windows.
+Fest into one file per set. For Windows and for Macs.
 
 This is a personal project, not made by or connected with WWOZ. The recordings it makes
 are for your own listening; please support the station at wwoz.org.
 
-## Installing it
+## Installing it on Windows
 
 1. On this page, click the green **Code** button, then **Download ZIP**, and unzip it
    somewhere that will stay put, such as your Documents folder.
@@ -20,17 +20,55 @@ are for your own listening; please support the station at wwoz.org.
    add the Jazz Fest set finder, which is a 2 GB download; you can skip it.
 3. Double-click **WWOZ Studio** on the desktop.
 
+## Installing it on a Mac
+
+The Mac version passes every check on GitHub's test Macs (macOS 14 and 15): Setup,
+downloading and playing a show, its song list, Shazam, cutting, the Trash, and the
+window itself. Nobody has used it at a real Mac yet, though, so it may still have a
+rough edge. If something goes wrong, the red "Setup stopped" line in
+the Terminal window, or the file `wwoz_studio_errors.log` in Documents/WWOZ Studio,
+says what happened.
+
+1. Click the green **Code** button, then **Download ZIP**. Open the downloaded file to
+   unzip it, and drag the unzipped folder into your home folder (in the Finder, choose
+   Go, then Home). Keep it out of the Desktop, Documents and Downloads folders: macOS
+   guards those three, and the Sunday download runs with nobody there to let it in.
+2. In the folder, double-click **Setup (Mac).command**. It opens in Terminal and
+   installs what the app needs with Homebrew, the usual installer for programs like
+   these on a Mac: Python 3.12, VLC media player, ffmpeg and a few Python packages. If
+   the Mac has no Homebrew, Setup offers to install it, which asks for your Mac
+   password. Setup then makes a **WWOZ Studio** app in the Applications folder in your
+   home folder, with a link to it on the desktop, and asks about the Sunday 9 AM
+   download and the 2 GB Jazz Fest set finder, as on Windows.
+
+   If the Mac won't open the file because it can't check it for malware, open System
+   Settings, choose Privacy & Security, scroll down and click **Open Anyway**. Another
+   way: open Terminal, type `bash` and a space, drag Setup (Mac).command into the
+   Terminal window, and press Return.
+3. Double-click **WWOZ Studio** on the desktop. The first time, macOS may ask whether it
+   can use your Documents and Music folders, where its settings and recordings go; say
+   yes.
+
+On a Mac, a right-click is a two-finger click on the trackpad or a Control-click, and
+the app's Ctrl keys are Command keys. While the app is open, the Dock may call it
+Python.
+
+## Where your things go
+
 Your things stay outside the program's folder, so you can replace the program with a
 newer download at any time: recordings go in **Music\WWOZ recordings** (pick another
 folder with "Recordings folder..." on the WWOZ Archive page), and your favorite shows and
-other settings in **Documents\WWOZ Studio**.
+other settings in **Documents\WWOZ Studio**. On a Mac, run Setup (Mac).command again
+after replacing or moving the program folder, so the app and the Sunday download find
+the new one.
 
 ## Across the top
 
 The dark band at the top shows what WWOZ is on the air with right now; **Listen live**
 plays the live stream (click again to stop). The page names under it switch pages, and so
-do Ctrl+1 to Ctrl+5. In the Player, Space plays or pauses, the left and right arrows skip
-30 seconds (5 minutes with Shift), and clicking anywhere on the progress bar jumps there.
+do Ctrl+1 to Ctrl+5 (Command+1 to Command+5 on a Mac). In the Player, Space plays or
+pauses, the left and right arrows skip 30 seconds (5 minutes with Shift), and clicking
+anywhere on the progress bar jumps there.
 
 ## The library
 
@@ -104,10 +142,11 @@ stream..." captures the live broadcast to an mp3, which the app then handles lik
 other recording.
 
 **Weekly Favorites** is WWOZ's whole weekly schedule. Check the shows you love, and every
-Sunday at 9 AM Windows downloads their new episodes (task "WWOZ Weekly Archive
-Download", log `weekly.log`). Click a show's name to read about it; "Download an
-episode..." grabs one right now. "Refresh schedule from wwoz.org" re-reads the site
-(a couple of minutes); otherwise the schedule is cached for a week in `wwoz_schedule.json`.
+Sunday at 9 AM the computer downloads their new episodes (on Windows the task "WWOZ
+Weekly Archive Download", on a Mac the job `local.wwoz-studio.weekly`; log `weekly.log`).
+Click a show's name to read about it; "Download an episode..." grabs one right now.
+"Refresh schedule from wwoz.org" re-reads the site (a couple of minutes); otherwise the
+schedule is cached for a week in `wwoz_schedule.json`.
 
 ## Under the hood (optional)
 
@@ -128,3 +167,28 @@ with `pythonw.exe` (e.g. the Sunday task, which Setup points at Documents\WWOZ
 Studio\weekly.log). The environment variables `WWOZ_RECORDINGS` and `WWOZ_DATA` move the
 recordings and settings folders, and `setup.ps1 -DryRun` shows what Setup would do.
 Remove the weekly automation: `Unregister-ScheduledTask -TaskName "WWOZ Weekly Archive Download"`.
+
+On a Mac, WWOZ Studio's own Python stands in for `py -3.12`:
+`~/Library/Application\ Support/WWOZ\ Studio/python/bin/python wwoz.py list` and so on.
+`bash "Setup (Mac).command" --dry-run` shows what the Mac setup would do (it also takes
+`--with-set-detection` and `--no-weekly`). Run the Sunday download right away with
+`launchctl kickstart gui/$(id -u)/local.wwoz-studio.weekly`; remove it with
+`launchctl bootout gui/$(id -u)/local.wwoz-studio.weekly` and by deleting
+`~/Library/LaunchAgents/local.wwoz-studio.weekly.plist`.
+
+## Trying it on a Mac for the first time
+
+These are the parts most likely to need a fix, in the order worth checking:
+
+1. Setup runs through to "Done" with no red "Setup stopped" line.
+2. WWOZ Studio opens from the desktop, with the purple and gold band across the top and
+   text at a comfortable size.
+3. A recording plays, and so does Listen live (this is VLC at work).
+4. A two-finger click on a row of the song list opens the menu, and "Show the file in its
+   folder" (two-finger click a recording in the library) opens the Finder.
+5. The Weekly Favorites list scrolls at a sensible speed with the trackpad.
+6. The Sunday download works when started by hand (the `launchctl kickstart` line above):
+   `weekly.log` in Documents/WWOZ Studio should list the shows it checked. If the log
+   stays empty, macOS may have kept it out of the Documents folder; giving Python access
+   under System Settings, Privacy & Security (Files and Folders, or Full Disk Access)
+   should fix that.
