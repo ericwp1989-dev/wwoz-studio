@@ -58,6 +58,56 @@ def test_show(wwoz, dest):
     return path
 
 
+def audio_awake():
+    """Lines of `pmset -g assertions` where the Mac's sound system is keeping it awake
+    (coreaudiod holds PreventUserIdleSystemSleep while an output plays)."""
+    r = subprocess.run(["pmset", "-g", "assertions"], capture_output=True, text=True, timeout=30)
+    return [ln.strip() for ln in r.stdout.splitlines()
+            if "PreventUserIdleSystemSleep" in ln and "coreaudiod" in ln]
+
+
+def sleep_checks(wwoz, path):
+    """The app must let the Mac sleep while nothing plays (the speakers used to run all
+    the time), and keep it awake while it records the live stream."""
+    import threading
+    import wwoz_player
+    try:
+        pl = wwoz_player.Player(wwoz.find_tool("ffmpeg"), wwoz.find_tool("ffprobe"))
+        pl.set_volume(0)
+        time.sleep(3)
+        idle = audio_awake()
+        pl.open(path)
+        time.sleep(4)
+        playing = audio_awake()
+        pl.pause()
+        time.sleep(3)
+        paused = audio_awake()
+        pl.close()
+        detail = f"idle {len(idle)}, playing {len(playing)}, paused {len(paused)} sound-system wake locks"
+        if playing:
+            check("the Mac can sleep while the app is idle or paused", not idle and not paused, detail)
+        else:                # this Mac shows no wake lock even while playing: can't tell here
+            check("the Mac can sleep while the app is idle or paused", not idle and not paused,
+                  detail + " (none while playing either, so this Mac can't show it)", soft=True)
+    except Exception as e:
+        check("the Mac can sleep while the app is idle or paused", False, repr(e))
+    try:
+        stop = threading.Event()
+        t = threading.Thread(target=wwoz.record_stream, args=(0.05, Path(os.environ["WWOZ_RECORDINGS"])),
+                             kwargs={"stop_flag": stop}, daemon=True)
+        t.start()
+        time.sleep(4)
+        held = subprocess.run(["pgrep", "-fl", "caffeinate"], capture_output=True, text=True).stdout
+        stop.set()
+        t.join(timeout=20)
+        after = subprocess.run(["pgrep", "-fl", "caffeinate"], capture_output=True, text=True).stdout
+        check("the Mac stays awake while recording, and not after",
+              str(os.getpid()) in held and str(os.getpid()) not in after, f"during: {held.strip()!r}; "
+              f"after: {after.strip()!r}")
+    except Exception as e:
+        check("the Mac stays awake while recording, and not after", False, repr(e))
+
+
 def program_checks():
     import wwoz
     check("this Mac", True, f"macOS {platform.mac_ver()[0]} on {platform.machine()}, "
@@ -82,10 +132,33 @@ def program_checks():
         ok = bool(pl.backend) and pl.state != "error"
         # a data center Mac may have no sound output at all: worth knowing, not a fault
         check("the sound player starts", ok, f"through {pl.backend}" if ok else pl.error,
-              soft=not ok and "sound device" in pl.error)
+              soft=not ok and ("sound device" in pl.error or "speakers" in pl.error))
         pl.close()
     except Exception as e:
         check("the sound player starts", False, repr(e))
+    try:                     # a stream that can't be reached says so, instead of silence forever
+        import wwoz_player
+        pl = wwoz_player.Player(wwoz.find_tool("ffmpeg"), wwoz.find_tool("ffprobe"))
+        pl.set_volume(0)
+        pl.open_stream("http://127.0.0.1:9/live")
+        t0 = time.time()
+        while pl.state != "error" and time.time() - t0 < 40:
+            time.sleep(0.2)
+        check("an unreachable live stream reports an error", pl.state == "error" and "couldn't be reached"
+              in pl.error, f"after {time.time() - t0:.0f} s: {pl.state}, {pl.error[:160]}")
+        pl.close()
+    except Exception as e:
+        check("an unreachable live stream reports an error", False, repr(e))
+    gone = Path(os.environ["WWOZ_DATA"]).parent / "data-missing-drive"
+    gone.mkdir(exist_ok=True)
+    (gone / "favorites.json").write_text(json.dumps({"recordings_dir": "/Volumes/WWOZ Drive Not Here/WWOZ",
+                                                     "favorites": []}))
+    r = subprocess.run([sys.executable, "-c", "import wwoz; print(wwoz.RECORDINGS_DIR); print(wwoz.RECORDINGS_PROBLEM)"],
+                       cwd=HERE, capture_output=True, text=True,
+                       env=dict(os.environ, WWOZ_DATA=str(gone), WWOZ_RECORDINGS=""))
+    check("a recordings folder on a missing drive falls back to Music, and says so",
+          r.returncode == 0 and "Music" in r.stdout and "can't be reached" in r.stdout,
+          (r.stdout or r.stderr).strip()[-300:])
     try:
         import shazamio  # noqa: F401
         check("Shazam library", True)
@@ -128,6 +201,8 @@ def program_checks():
               [(p["file"], p["songs"]) for p in idx["pieces"]] if idx else None)
     except Exception as e:
         check("cut into whole shows", False, repr(e))
+
+    sleep_checks(wwoz, path)
 
     junk = wwoz.RECORDINGS_DIR / f"trash-test-{int(time.time())}.txt"
     junk.write_text("x")

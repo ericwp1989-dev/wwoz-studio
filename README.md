@@ -11,14 +11,23 @@ are for your own listening; please support the station at wwoz.org.
 
 ## Installing it on Windows
 
-1. On this page, click the green **Code** button, then **Download ZIP**, and unzip it
-   somewhere that will stay put, such as your Documents folder.
-2. In the unzipped folder, double-click **Setup.cmd**. It installs what the app needs
-   (Python 3.12, ffmpeg and a few Python packages; it asks Windows to install any that
-   are missing), puts a **WWOZ Studio** shortcut on your desktop, and offers to
-   download your favorite shows every Sunday at 9 AM. It also asks whether to add the
-   Jazz Fest set finder, which is a 2 GB download; you can skip it.
+1. On this page, click the green **Code** button, then **Download ZIP**. Right-click the
+   downloaded file, choose **Extract All**, and extract it somewhere that will stay put,
+   such as your Documents folder. (Opening the ZIP and double-clicking inside it isn't
+   enough: Setup needs the extracted folder.)
+2. In the extracted folder, double-click **Setup.cmd**. Windows will probably show a blue
+   box saying "Windows protected your PC", because the file came from the internet and
+   isn't from a big company: click **More info**, then **Run anyway**.
+
+   Setup installs what the app needs (Python 3.12, ffmpeg and a few Python packages;
+   Windows may ask for permission to install them, so say yes), puts a **WWOZ Studio**
+   shortcut on your desktop, and offers to download your favorite shows every Sunday at
+   9 AM. It also asks whether to add the Jazz Fest set finder, which is a 2 GB download;
+   you can skip it. It takes a few minutes and ends with "Done".
 3. Double-click **WWOZ Studio** on the desktop.
+
+If you later move the folder, or replace it with a newer download, double-click
+Setup.cmd again from the new folder, so the shortcut and the Sunday download find it.
 
 ## Installing it on a Mac
 
@@ -58,9 +67,9 @@ Python.
 Your things stay outside the program's folder, so you can replace the program with a
 newer download at any time: recordings go in **Music\WWOZ recordings** (pick another
 folder with "Recordings folder..." on the WWOZ Archive page), and your favorite shows and
-other settings in **Documents\WWOZ Studio**. On a Mac, run Setup (Mac).command again
-after replacing or moving the program folder, so the app and the Sunday download find
-the new one.
+other settings in **Documents\WWOZ Studio**. After replacing or moving the program
+folder, run Setup again (Setup.cmd, or Setup (Mac).command on a Mac), so the app and the
+Sunday download find the new one.
 
 ## Across the top
 

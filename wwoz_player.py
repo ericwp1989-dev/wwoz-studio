@@ -81,6 +81,37 @@ def is_vbr_mp3(path):
         return False
 
 
+def drain(pipe, keep):
+    """Read a program's messages as they come, keeping the last few. Left unread, the
+    pipe (4 KB on Windows) fills after a few dozen error lines from a damaged file or a
+    glitchy stream, ffmpeg stops to wait for room, and the sound freezes."""
+    try:
+        for line in iter(pipe.readline, b""):
+            keep.append(line)
+    except (OSError, ValueError):
+        pass
+
+
+def open_device(miniaudio, period_ms):
+    """The speakers, through miniaudio, which makes a "context" (with a thread of its
+    own) for every device and never frees it: each retry while the speakers were
+    unplugged left a thread behind. So the context is kept here and freed with the
+    device, or at once when the device won't open."""
+    made = []
+
+    class Device(miniaudio.PlaybackDevice):
+        def _make_context(self, *args, **kw):
+            made.append(super()._make_context(*args, **kw))
+            return made[-1]
+    try:
+        return Device(output_format=miniaudio.SampleFormat.SIGNED16, nchannels=2, sample_rate=RATE,
+                      buffersize_msec=period_ms, app_name="WWOZ Studio"), made[0]
+    except Exception:
+        for ctx in made:
+            miniaudio.lib.ma_context_uninit(ctx)
+        raise
+
+
 # ------------------------------------------------------------------- engine --
 
 class Engine:
@@ -112,13 +143,35 @@ class Engine:
         self._gen = 0               # bumped by every open and stop, so an old reader quits
         self._seek = None
         self._vbr = False
-        self.device = miniaudio.PlaybackDevice(
-            output_format=miniaudio.SampleFormat.SIGNED16, nchannels=2, sample_rate=RATE,
-            buffersize_msec=period_ms, app_name="WWOZ Studio")
+        self._got_at = 0.0          # when ffmpeg last sent sound (check_live watches it)
+        self._heard = False         # whether this stream has sent any sound yet
+        self._live_proc = None
+        self._last_err = ""         # ffmpeg's last word on a stream connection that ended
+        self._lib = miniaudio.lib
+        self.device, self._context = open_device(miniaudio, period_ms)
         self.backend = self.device.backend
         self._feed = self._feeder()
         next(self._feed)
-        self.device.start(self._feed)
+        # The speakers run only while something plays (see sync_device): a running
+        # output keeps the computer from going to sleep, even when all it plays is silence.
+        self._dev_lock = threading.Lock()
+
+    def sync_device(self):
+        """Start the speakers when there is something to play and stop them when there
+        isn't (paused, stopped, at the end, or an error)."""
+        with self._dev_lock:
+            want = self.state == "playing"
+            if want and not self.device.running:
+                try:
+                    self.device.start(self._feed)
+                except Exception as e:
+                    self.error = f"the speakers or headphones wouldn't start ({e})"
+                    self.state = "error"
+            elif not want and self.device.running:
+                try:
+                    self.device.stop()
+                except Exception:
+                    pass
 
     def open(self, source, live=False, start=0.0):
         """Play a file (from `start` seconds) or a web stream from the top."""
@@ -127,6 +180,7 @@ class Engine:
             gen = self._gen
             self._reset(0.0 if live else start, prebuffer=1.0 if live else 0.25)
         self.live, self.error, self.duration = live, "", 0.0
+        self._got_at, self._heard, self._last_err = time.time(), False, ""
         self.state = "playing"
         threading.Thread(target=self._reader, args=(gen, str(source), live, start), daemon=True).start()
 
@@ -158,9 +212,30 @@ class Engine:
             self._reset(0.0, prebuffer=0)
         self.state = "stopped"
 
+    def check_live(self):
+        """Give up on a live stream that has sent nothing for a while, and say so: with
+        no internet, ffmpeg retries quietly for 10 to 40 seconds a time, and the app
+        would show "playing" over silence forever. 20 seconds before any sound arrives;
+        45 once it has played, to ride out a short drop."""
+        if not (self.live and self.state == "playing"):
+            return
+        if time.time() - self._got_at < (45 if self._heard else 20):
+            return
+        with self._lock:
+            self._gen += 1                       # the reader quits when its ffmpeg ends
+            self._reset(0.0, prebuffer=0)
+        proc = self._live_proc
+        if proc:
+            proc.kill()
+        self.error = ("WWOZ's live stream couldn't be reached. Check that this computer is online, "
+                      "then click Listen live again."
+                      + (f" (ffmpeg said: {self._last_err})" if self._last_err else ""))
+        self.state = "error"
+
     def close(self):
         self.stop()
         self.device.close()
+        self._lib.ma_context_uninit(self._context)
 
     @property
     def position(self):
@@ -272,6 +347,11 @@ class Engine:
                 return
             finally:
                 os.close(w)                       # ffmpeg holds its own copy; EOF comes when it ends
+            errs = collections.deque(maxlen=20)
+            talk = threading.Thread(target=drain, args=(proc.stderr, errs), daemon=True)
+            talk.start()
+            if live:
+                self._live_proc = proc
             t, got, jump, rest = pos, 0, None, b""
             try:
                 while gen == self._gen:
@@ -286,12 +366,15 @@ class Engine:
                     whole = len(data) - len(data) % FRAME_BYTES
                     data, rest = data[:whole], data[whole:]
                     got += len(data)
+                    self._got_at, self._heard = time.time(), True
                     if not self._put(gen, t, data):
                         continue                          # a jump came in: handled at the top
                     t += len(data) / FRAME_BYTES / RATE
             finally:
                 proc.kill()
-                err = proc.communicate()[1].decode(errors="replace").strip()
+                proc.wait()
+                talk.join(timeout=2)
+                err = b"".join(errs).decode(errors="replace").strip()
                 os.close(r)
             if gen != self._gen:
                 return
@@ -299,6 +382,8 @@ class Engine:
                 pos = jump
                 continue
             if live:                                      # the stream dropped: connect again
+                if err:                                   # (check_live gives up if it stays down)
+                    self._last_err = err.splitlines()[-1][:200]
                 time.sleep(1)
                 continue
             if not got and err:
@@ -372,8 +457,11 @@ def serve(ffmpeg, ffprobe):
 
     def ticker():
         while True:
-            report()
             eng = have["eng"]
+            if eng:
+                eng.check_live()
+                eng.sync_device()                         # speakers off once a show ends or fails
+            report()
             time.sleep(0.1 if eng and eng.state == "playing" else 0.5)
     threading.Thread(target=ticker, daemon=True).start()
 
@@ -401,6 +489,7 @@ def serve(ffmpeg, ffprobe):
                 eng.stop()
             elif do == "volume":
                 eng.volume = have["volume"]
+            eng.sync_device()                             # speakers on to play, off when not
         status["ack"] = cmd.get("id", status["ack"])
         report()
     if have["eng"]:
@@ -428,6 +517,7 @@ class Player:
         self._lock = threading.RLock()
         self._closing = False
         self._proc = None
+        self._volume = None             # sent again to a helper started after one stopped
         self._start()
 
     @property
@@ -453,7 +543,8 @@ class Player:
         self._do("seek", position=max(0.0, seconds), to=max(0.0, float(seconds)))
 
     def set_volume(self, fraction):
-        self._send({"do": "volume", "value": float(fraction)})
+        self._volume = float(fraction)
+        self._send({"do": "volume", "value": self._volume})
 
     def close(self):
         self._closing = True
@@ -485,6 +576,11 @@ class Player:
         with self._lock:
             if self._proc.poll() is not None and not self._closing:
                 self._start()                     # it stopped: start a new one
+                if self._volume is not None and cmd.get("do") != "volume":
+                    try:                          # at the volume the slider shows, not full
+                        self._proc.stdin.write(json.dumps({"do": "volume", "value": self._volume}) + "\n")
+                    except (OSError, ValueError):
+                        pass
             self._id += 1
             cmd["id"] = self._id
             try:
