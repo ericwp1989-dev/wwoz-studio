@@ -1,7 +1,7 @@
 <#
 Sets up WWOZ Studio on this computer. Double-click Setup.cmd to run it.
 
-  1. Python 3.12, VLC media player and ffmpeg, installed with winget if they are missing
+  1. Python 3.12 and ffmpeg, installed with winget if they are missing
   2. the Python packages in requirements.txt, and the festival set finder if you say yes
   3. a "WWOZ Studio" shortcut on the desktop
   4. if you say yes, a Windows task that downloads your favorite shows every Sunday at 9 AM
@@ -57,14 +57,7 @@ try {
     if (HavePython) { Write-Host "   found: $(& py -3.12 --version)" }
     else { WingetInstall "Python.Python.3.12" "Python 3.12"; RefreshPath }
 
-    Step "VLC media player (plays the recordings)"
-    # where VLC's installer recorded itself (it may be on another drive), else the usual place
-    $dirs = @((Get-ItemProperty "HKLM:\SOFTWARE\VideoLAN\VLC" -ErrorAction SilentlyContinue).InstallDir,
-              "$env:ProgramFiles\VideoLAN\VLC") | Where-Object { $_ }
-    $vlc = $dirs | ForEach-Object { Join-Path $_ "libvlc.dll" } | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($vlc) { Write-Host "   found: $(Split-Path $vlc)" } else { WingetInstall "VideoLAN.VLC" "VLC media player" }
-
-    Step "ffmpeg (reads and cuts the audio)"
+    Step "ffmpeg (reads the audio for the player, and cuts it)"
     $ff = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if (-not $ff) {
         $link = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\ffmpeg.exe"
@@ -74,13 +67,13 @@ try {
 
     Step "Python packages"
     Run "pip install -r requirements.txt" {
-        & py -3.12 -m pip install --user --upgrade --disable-pip-version-check -r "$here\requirements.txt"
+        & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location -r "$here\requirements.txt"
         if ($LASTEXITCODE) { throw "pip couldn't install the packages (code $LASTEXITCODE)" }
     }
     $sets = $WithSetDetection -or (Ask "Also install the Jazz Fest set finder? It's about a 2 GB download." $false)
     if ($sets) {
         Run "pip install -r requirements-sets.txt" {
-            & py -3.12 -m pip install --user --upgrade --disable-pip-version-check -r "$here\requirements-sets.txt"
+            & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location -r "$here\requirements-sets.txt"
             if ($LASTEXITCODE) { throw "pip couldn't install the set finder (code $LASTEXITCODE)" }
         }
     } else { Write-Host "   set finder skipped (run Setup again to add it later)" }

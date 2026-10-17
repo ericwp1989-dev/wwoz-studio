@@ -2,8 +2,8 @@
 # Sets up WWOZ Studio on a Mac. Double-click this file to run it; macOS opens it in
 # Terminal. It does on a Mac what Setup.cmd and setup.ps1 do on Windows:
 #
-#   1. Python 3.12 (with the Tk library its windows need), VLC media player and ffmpeg,
-#      installed with Homebrew if they are missing (Homebrew too, if you say yes)
+#   1. Python 3.12 (with the Tk library its windows need) and ffmpeg, installed with
+#      Homebrew if they are missing (Homebrew too, if you say yes)
 #   2. the Python packages in requirements.txt, kept in WWOZ Studio's own copy of
 #      Python in ~/Library/Application Support/WWOZ Studio, and the festival set finder
 #      if you say yes
@@ -81,7 +81,7 @@ else
     echo "   Homebrew is the usual way to install programs like these on a Mac (brew.sh)."
     echo "   Its installer asks for your Mac password, and may install Apple's developer"
     echo "   tools first; that part can take a while."
-    ask "Install Homebrew now?" y || fail "WWOZ Studio needs Homebrew, or Python 3.12, VLC and ffmpeg installed by hand."
+    ask "Install Homebrew now?" y || fail "WWOZ Studio needs Homebrew, or Python 3.12 and ffmpeg installed by hand."
     install_homebrew() {
         /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     }
@@ -107,12 +107,7 @@ else
     brew_install "the Tk library for Python 3.12" python-tk@3.12
 fi
 
-step "VLC media player (plays the recordings)"
-if [ -d /Applications/VLC.app ]; then echo "   found: /Applications/VLC.app"
-elif [ -d "$HOME/Applications/VLC.app" ]; then echo "   found: $HOME/Applications/VLC.app"
-else brew_install "VLC media player" --cask vlc; fi
-
-step "ffmpeg (reads and cuts the audio)"
+step "ffmpeg (reads the audio for the player, and cuts it)"
 if command -v ffmpeg >/dev/null; then echo "   found: $(command -v ffmpeg)"; else brew_install ffmpeg ffmpeg; fi
 
 step "Python packages"

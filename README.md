@@ -14,10 +14,10 @@ are for your own listening; please support the station at wwoz.org.
 1. On this page, click the green **Code** button, then **Download ZIP**, and unzip it
    somewhere that will stay put, such as your Documents folder.
 2. In the unzipped folder, double-click **Setup.cmd**. It installs what the app needs
-   (Python 3.12, VLC media player, ffmpeg and a few Python packages; it asks Windows to
-   install any that are missing), puts a **WWOZ Studio** shortcut on your desktop, and
-   offers to download your favorite shows every Sunday at 9 AM. It also asks whether to
-   add the Jazz Fest set finder, which is a 2 GB download; you can skip it.
+   (Python 3.12, ffmpeg and a few Python packages; it asks Windows to install any that
+   are missing), puts a **WWOZ Studio** shortcut on your desktop, and offers to
+   download your favorite shows every Sunday at 9 AM. It also asks whether to add the
+   Jazz Fest set finder, which is a 2 GB download; you can skip it.
 3. Double-click **WWOZ Studio** on the desktop.
 
 ## Installing it on a Mac
@@ -35,11 +35,11 @@ says what happened.
    guards those three, and the Sunday download runs with nobody there to let it in.
 2. In the folder, double-click **Setup (Mac).command**. It opens in Terminal and
    installs what the app needs with Homebrew, the usual installer for programs like
-   these on a Mac: Python 3.12, VLC media player, ffmpeg and a few Python packages. If
-   the Mac has no Homebrew, Setup offers to install it, which asks for your Mac
-   password. Setup then makes a **WWOZ Studio** app in the Applications folder in your
-   home folder, with a link to it on the desktop, and asks about the Sunday 9 AM
-   download and the 2 GB Jazz Fest set finder, as on Windows.
+   these on a Mac: Python 3.12, ffmpeg and a few Python packages. If the Mac has no
+   Homebrew, Setup offers to install it, which asks for your Mac password. Setup then
+   makes a **WWOZ Studio** app in the Applications folder in your home folder, with a
+   link to it on the desktop, and asks about the Sunday 9 AM download and the 2 GB
+   Jazz Fest set finder, as on Windows.
 
    If the Mac won't open the file because it can't check it for malware, open System
    Settings, choose Privacy & Security, scroll down and click **Open Anyway**. Another
@@ -154,6 +154,9 @@ Everything also works from a terminal in this folder:
 `py -3.12 wwoz.py list | schedule | download | tracklist | identify | autocut | split | festival | record | weekly`
 (`festival` marks and cuts every festival in a `fest-*.json` whose broadcasts are downloaded.)
 Errors the app runs into are written to `wwoz_studio_errors.log` in Documents\WWOZ Studio.
+The sound comes from `wwoz_player.py`: ffmpeg reads the recording or the stream and the
+miniaudio package plays it on the system's default output, in a small helper process of
+its own, so nothing else the app is doing can make it skip.
 (`schedule -v` prints the weekly grid with a description under each show.)
 Files produced per recording: `.tracklist.csv` (spreadsheet), `.cue` (VLC/foobar2000
 can use it to show chapters), `.shazam.csv` (fingerprint results).
@@ -183,7 +186,7 @@ These are the parts most likely to need a fix, in the order worth checking:
 1. Setup runs through to "Done" with no red "Setup stopped" line.
 2. WWOZ Studio opens from the desktop, with the purple and gold band across the top and
    text at a comfortable size.
-3. A recording plays, and so does Listen live (this is VLC at work).
+3. A recording plays, and so does Listen live (this is the sound player at work).
 4. A two-finger click on a row of the song list opens the menu, and "Show the file in its
    folder" (two-finger click a recording in the library) opens the Finder.
 5. The Weekly Favorites list scrolls at a sensible speed with the trackpad.
