@@ -15,3 +15,7 @@ wwoz_schedule.json
 # the test player's own Python (made by playtest/Try the test player.cmd)
 playtest/.venv/
 playtest/test player errors.txt
+
+# the error-report receiver's local files from wrangler
+error-reports/.wrangler/
+error-reports/node_modules/

@@ -20,6 +20,10 @@ jobs:
         os: [macos-15, macos-14]     # macOS 15 has a trash command; 14 goes through the Finder
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      # error reports from this test go nowhere (nothing listens there); the report checks
+      # in mac_check.py point them at a stand-in receiver of their own
+      WWOZ_REPORT_URL: http://127.0.0.1:9/report
     defaults:
       run:
         shell: bash
@@ -57,6 +61,10 @@ jobs:
       - name: Open the app the way the Finder does
         if: always()
         run: |
+          # an app opened by the Finder doesn't see this job's settings, so turn its error
+          # reports off in its own settings file
+          mkdir -p "$HOME/Documents/WWOZ Studio"
+          [ -f "$HOME/Documents/WWOZ Studio/favorites.json" ] || echo '{"send_error_reports": false, "favorites": []}' > "$HOME/Documents/WWOZ Studio/favorites.json"
           open "$HOME/Applications/WWOZ Studio.app"
           sleep 30
           screencapture -x out/7-app-opened-from-finder.png || true

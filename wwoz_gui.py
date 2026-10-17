@@ -29,6 +29,20 @@ else:
 
 APP = "WWOZ Studio"
 
+try:
+    import wwoz_report  # error reports to the program's maker (Python's own modules only)
+except Exception:
+    wwoz_report = None
+
+
+def report_exception(kind, exc_info=None, wait=False):
+    """Send the error being handled (or exc_info) as a report; never raises."""
+    if wwoz_report:
+        try:
+            wwoz_report.send_exception(kind, exc_info, wait=wait)
+        except Exception:
+            pass
+
 
 def cannot_start(exc, log=None):
     """Say in a box why the app can't open. It runs without a console, so an error while
@@ -42,6 +56,7 @@ def cannot_start(exc, log=None):
     else:
         why = (f"{exc}\n\nDouble-click {setup} in the program's folder and try again. If that "
                f"doesn't help, the details are in the error log.")
+    report_exception("the app couldn't open", wait=True)
     log = log or (Path(os.environ.get("WWOZ_DATA") or Path.home() / "Documents" / "WWOZ Studio")
                   / "wwoz_studio_errors.log")
     try:
@@ -95,6 +110,7 @@ def log_error():
             f.write(f"\n===== {datetime.now():%Y-%m-%d %I:%M:%S %p}\n{traceback.format_exc()}")
     except OSError:
         pass
+    report_exception("app error")
 
 
 def log_line(text):
@@ -105,6 +121,8 @@ def log_line(text):
             f.write(f"\n===== {datetime.now():%Y-%m-%d %I:%M:%S %p}\n{text}\n")
     except OSError:
         pass
+    if wwoz_report and text.startswith("playback problem"):
+        wwoz_report.send("playback", text)
 
 
 def log_error_from(exc_info):
@@ -116,6 +134,7 @@ def log_error_from(exc_info):
                     + "".join(traceback.format_exception(*exc_info)))
     except OSError:
         pass
+    report_exception("app error", exc_info)
 
 
 def load_state():
@@ -410,8 +429,17 @@ class App(tk.Tk):
         # ---- activity: the chalkboard at the bottom of every page ----
         logf = tk.Frame(self, background=SLATE)
         logf.pack(fill="x", side="bottom")
-        tk.Label(logf, text="ACTIVITY", background=SLATE, foreground=GOLD_HI, font=FONT_SIGN,
-                 anchor="w").pack(fill="x", padx=12, pady=(6, 0))
+        head = tk.Frame(logf, background=SLATE)
+        head.pack(fill="x", padx=12, pady=(6, 0))
+        tk.Label(head, text="ACTIVITY", background=SLATE, foreground=GOLD_HI, font=FONT_SIGN,
+                 anchor="w").pack(side="left")
+        # errors go to the program's maker on their own (wwoz_report); this box turns that off
+        self.report_var = tk.BooleanVar(value=bool(wwoz_report and wwoz_report.enabled()))
+        tk.Checkbutton(head, text="Send error reports", variable=self.report_var,
+                       command=lambda: wwoz_report and wwoz_report.set_enabled(self.report_var.get()),
+                       background=SLATE, foreground=CHALK, activebackground=SLATE,
+                       activeforeground=GOLD_HI, selectcolor=SLATE, highlightthickness=0, bd=0,
+                       font=FONT_SM, cursor="hand2").pack(side="right")
         self.log = tk.Text(logf, height=2 if self.compact else 4, wrap="word", state="disabled", relief="flat",
                            background=SLATE, foreground=CHALK, insertbackground=CHALK,
                            highlightthickness=0, padx=12, pady=4, font=FONT_LOG)
@@ -1542,6 +1570,7 @@ class App(tk.Tk):
             self.player.set_volume(self.vol.get() / 100)
         except Exception as e:
             self.player = None
+            log_error()
             messagebox.showerror(APP, f"The sound player couldn't start, so recordings won't play.\n\n{e}")
             return
         self.after(1500, self._player_ready)
@@ -1916,6 +1945,7 @@ class App(tk.Tk):
                 wwoz.record_stream(hrs, RECORDINGS_DIR, stop_flag=stop)
             except Exception as e:
                 self.logln(f"recording ERROR: {e}")
+                log_error()
                 self.after(0, lambda e=e: messagebox.showerror(APP, f"The live recording stopped.\n\n{e}"))
             finally:
                 done.set()                       # the file is closed (see _on_close)
@@ -1942,6 +1972,7 @@ class App(tk.Tk):
             try:
                 wwoz.fetch_schedule(refresh=True)
             except Exception as e:
+                log_error()
                 self.logln(f"couldn't get the weekly schedule from wwoz.org ({e}); "
                            + ("the saved copy is still used" if data else
                               "it is tried again the next time WWOZ Studio opens"))
@@ -2166,6 +2197,7 @@ class App(tk.Tk):
                     got.append(wwoz.download_show(s, dest))
                 except Exception as e:
                     self.logln(f"    FAILED: {e}")
+                    log_error()
             self._cut_new_festivals(got)
         self._bg(work, done=lambda: (self.refresh_library(), self.refresh_shows(), self.load_favorites()))
 

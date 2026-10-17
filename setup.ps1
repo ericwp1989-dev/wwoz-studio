@@ -9,15 +9,66 @@ Sets up WWOZ Studio on this computer. Double-click Setup.cmd to run it.
 Running it again is safe: it skips whatever is already there. Run it again after moving
 or replacing the program's folder, so the shortcut and the Sunday task find the new one.
 
+If Setup stops, it sends a short error report to the person who made WWOZ Studio (what
+went wrong and at which step, the Windows version; your user name is taken out), the
+same reports the app sends (see wwoz_report.py). WWOZ_NO_REPORTS=1 turns that off.
+
   -DryRun            say what it would do, and change nothing
   -WithSetDetection  install the set finder without asking
   -NoWeekly          skip the Sunday download without asking
+  -ReportTest        send a test error report, to check that reports arrive, and stop
 #>
-param([switch]$DryRun, [switch]$WithSetDetection, [switch]$NoWeekly)
+param([switch]$DryRun, [switch]$WithSetDetection, [switch]$NoWeekly, [switch]$ReportTest)
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:step = "starting"
+$pipLog = Join-Path $env:TEMP "wwoz-setup-pip.log"
 
-function Step($msg) { Write-Host ""; Write-Host "== $msg" -ForegroundColor Yellow }
+function Step($msg) { $script:step = $msg; Write-Host ""; Write-Host "== $msg" -ForegroundColor Yellow }
+
+function SendReport($message, $logFile) {
+    # The error report described above. Never stops Setup itself, whatever happens.
+    if ($DryRun -or $env:WWOZ_NO_REPORTS) { return $false }
+    try {
+        $scrub = {
+            param($t)
+            $t = [string]$t
+            if ($env:USERPROFILE) { $t = $t.Replace($env:USERPROFILE, "~") }
+            if ($env:USERNAME -and $env:USERNAME.Length -gt 2) {
+                $t = [regex]::Replace($t, "(?i)(?<![A-Za-z0-9])" + [regex]::Escape($env:USERNAME) + "(?![A-Za-z0-9])", "<user>")
+            }
+            return $t
+        }
+        $detail = ""
+        if ($logFile -and (Test-Path $logFile)) { $detail = (Get-Content $logFile -Tail 40) -join "`n" }
+        $version = "unknown"
+        $m = Select-String -Path (Join-Path $here "wwoz_report.py") -Pattern '^VERSION = "(.+)"' -ErrorAction SilentlyContinue
+        if ($m) { $version = $m.Matches[0].Groups[1].Value }
+        $kind = "Setup stopped (Windows)"
+        $msg = & $scrub "$($script:step): $message"
+        $sha = [Security.Cryptography.SHA1]::Create()
+        $key = $kind + "|" + [regex]::Replace($msg, "\d+", "#")
+        $fp = (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)) | ForEach-Object { $_.ToString("x2") })).Substring(0, 16)
+        $os = [Environment]::OSVersion.VersionString
+        $body = @{
+            app = "WWOZ Studio"; kind = $kind; message = $msg; traceback = (& $scrub $detail)
+            version = "$version (setup)"; system = "$os, $env:PROCESSOR_ARCHITECTURE"
+            python = ""; install = "setup"; fingerprint = $fp
+        } | ConvertTo-Json
+        $url = $env:WWOZ_REPORT_URL
+        if (-not $url) { $url = "https://wwoz-studio-reports.ericwp1989.workers.dev/report" }
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -TimeoutSec 15 `
+            -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null
+        return $true
+    } catch { return $false }
+}
+
+if ($ReportTest) {
+    if (SendReport "a test report from Setup -ReportTest" $null) { Write-Host "Test report sent." }
+    else { Write-Host "The test report couldn't be sent (no internet, reports turned off, or the receiver isn't up yet)." }
+    exit 0
+}
 
 function Run($what, [scriptblock]$action) {
     if ($DryRun) { Write-Host "   would: $what" } else { Write-Host "   $what"; & $action }
@@ -65,6 +116,7 @@ function HavePython {
 try {
     Write-Host "Setting up WWOZ Studio in $here" -ForegroundColor Cyan
     if ($DryRun) { Write-Host "(dry run: nothing will be changed)" }
+    Write-Host "(If Setup stops, it sends a short error report to the person who made WWOZ Studio.)"
     if ($env:TEMP -and $here.StartsWith($env:TEMP, [StringComparison]::OrdinalIgnoreCase)) {
         throw ("Setup is running from a temporary folder, which happens when it's opened from inside " +
                "the ZIP file. Close this window, right-click the downloaded ZIP file, choose Extract " +
@@ -112,13 +164,15 @@ try {
 
     Step "Python packages"
     Run "adding the Python packages WWOZ Studio uses (a minute or two)" {
-        & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location -r "$here\requirements.txt"
+        Remove-Item $pipLog -ErrorAction SilentlyContinue      # pip's own log, for a report if it fails
+        & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location --log $pipLog -r "$here\requirements.txt"
         if ($LASTEXITCODE) { throw "pip, Python's package installer, couldn't add the packages (code $LASTEXITCODE). Check the internet connection and run Setup again." }
     }
     $sets = $WithSetDetection -or (Ask "Also install the Jazz Fest set finder? It's about a 2 GB download." $false)
     if ($sets) {
         Run "adding the set finder's packages (about 2 GB; this takes a while)" {
-            & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location -r "$here\requirements-sets.txt"
+            Remove-Item $pipLog -ErrorAction SilentlyContinue
+            & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location --log $pipLog -r "$here\requirements-sets.txt"
             if ($LASTEXITCODE) { throw "pip couldn't add the set finder (code $LASTEXITCODE). Check the internet connection and run Setup again." }
         }
     } else { Write-Host "   set finder skipped (run Setup again to add it later)" }
@@ -175,5 +229,10 @@ try {
 } catch {
     Write-Host ""
     Write-Host "Setup stopped: $($_.Exception.Message)" -ForegroundColor Red
+    $log = $null
+    if ($script:step -eq "Python packages") { $log = $pipLog }
+    if (SendReport $_.Exception.Message $log) {
+        Write-Host "A short report of this went to the person who made WWOZ Studio."
+    }
     exit 1
 }

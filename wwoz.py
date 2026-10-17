@@ -139,10 +139,12 @@ DEFAULT_CONFIG = {
         "slot too, because the archive titles some shows differently from the schedule.",
         "'enabled': true downloads new episodes weekly. 'recordings_dir' is the folder for",
         "your recordings (blank: 'WWOZ recordings' in Music). 'download_dir' is relative to",
-        "the recordings folder unless you give an absolute path.",
+        "the recordings folder unless you give an absolute path. 'send_error_reports': false",
+        "stops the error reports described in wwoz_report.py.",
     ],
     "recordings_dir": "",
     "download_dir": "archive_downloads",
+    "send_error_reports": True,
     "favorites": [],
 }
 
@@ -226,6 +228,19 @@ class ToolError(RuntimeError):
     """A problem a caller can catch and log (a missing program, an unreadable file).
     Raised instead of sys.exit, which slipped past every `except Exception` and silently
     ended the Sunday task, a batch run, or the app's background scanner."""
+
+
+def report_error(kind, message=None):
+    """Send the error being handled to the program's maker (see wwoz_report.py). Waits up
+    to ten seconds, since the Sunday task may end right after; never raises."""
+    try:
+        import wwoz_report
+        if message is None:
+            wwoz_report.send_exception(kind, data_dir=DATA_DIR, wait=True)
+        else:
+            wwoz_report.send(kind, message, data_dir=DATA_DIR, wait=True)
+    except Exception:
+        pass
 
 
 class NoStartTime(ToolError):
@@ -2309,11 +2324,13 @@ def cmd_weekly(args):
                 fests[f["name"]] = f
         except Exception as e:
             out(f"    FAILED: {e}")
+            report_error("Sunday download")
     for f in fests.values():                    # a festival broadcast among them: recut its sets
         try:
             cut_festival(f, dest_dir)
         except Exception as e:
             out(f"    cutting {f['name']} into sets failed: {e}")
+            report_error("festival cut")
     retry = sorted(dest_dir.glob("*.tracklist.failed"))
     if retry:
         out(f"Retrying the DJ song list for {len(retry)} earlier download(s):")
@@ -2435,8 +2452,10 @@ def main():
         args.fn(args)
     except ToolError as e:
         out(f"ERROR: {e}")
+        report_error(f"wwoz.py {args.cmd}", str(e))
         sys.exit(1)
     except Exception:
+        report_error(f"wwoz.py {args.cmd}")
         if not args.log:
             raise
         import traceback

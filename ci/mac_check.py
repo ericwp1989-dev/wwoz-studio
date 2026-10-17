@@ -108,6 +108,67 @@ def sleep_checks(wwoz, path):
         check("the Mac stays awake while recording, and not after", False, repr(e))
 
 
+def report_checks():
+    """Error reports from this Mac reach a receiver (a stand-in on this machine, never the
+    real one) as JSON, with the user name and home folder taken out: from the app's code,
+    from a command-line task that stops, and from Setup."""
+    import http.server
+    import threading
+    got = []
+
+    class Receiver(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            try:
+                got.append(json.loads(body))
+                self.send_response(200)
+            except ValueError:
+                got.append({"not json": body.decode("utf-8", "replace")[:300]})
+                self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Receiver)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}/report"
+    env = dict(os.environ, WWOZ_REPORT_URL=url)
+    env.pop("WWOZ_NO_REPORTS", None)
+    home, user = str(Path.home()), os.environ.get("USER", "")
+
+    def private(rep):
+        text = json.dumps(rep)
+        return home in text or (len(user) > 2 and f"/{user}/" in text)
+
+    def wait(n):
+        t0 = time.time()
+        while len(got) < n and time.time() - t0 < 20:
+            time.sleep(0.2)
+        return got[n - 1] if len(got) >= n else {}
+
+    r = subprocess.run([sys.executable, "-c", "import wwoz_report, sys; wwoz_report.send('test', sys.argv[1], wait=True)",
+                        f"couldn't open {home}/Music/WWOZ recordings/show.mp3"], cwd=HERE, env=env,
+                       capture_output=True, text=True, timeout=60)
+    rep = wait(1)
+    check("an error report from the app's code arrives", rep.get("kind") == "test" and not private(rep),
+          rep.get("message") or r.stderr[-300:])
+    bad = Path(os.environ["WWOZ_RECORDINGS"]) / "Saturday night.mp3"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=5", "-y", str(bad)])
+    r = subprocess.run([sys.executable, "wwoz.py", "tracklist", str(bad)], cwd=HERE, env=env,
+                       capture_output=True, text=True, timeout=120)
+    rep = wait(2)
+    check("a command-line task that stops reports it", r.returncode == 1
+          and rep.get("kind") == "wwoz.py tracklist" and not private(rep), rep.get("message") or r.stdout[-300:])
+    r = subprocess.run(["bash", str(HERE / "Setup (Mac).command"), "--report-test"], env=env,
+                       capture_output=True, text=True, timeout=60)
+    rep = wait(3)
+    check("Setup's error report arrives as JSON", "Test report sent" in r.stdout
+          and rep.get("kind") == "Setup stopped (Mac)" and rep.get("system", "").startswith("macOS")
+          and not private(rep), rep or r.stdout[-300:])
+    srv.shutdown()
+
+
 def program_checks():
     import wwoz
     check("this Mac", True, f"macOS {platform.mac_ver()[0]} on {platform.machine()}, "
@@ -203,6 +264,7 @@ def program_checks():
         check("cut into whole shows", False, repr(e))
 
     sleep_checks(wwoz, path)
+    report_checks()
 
     junk = wwoz.RECORDINGS_DIR / f"trash-test-{int(time.time())}.txt"
     junk.write_text("x")
