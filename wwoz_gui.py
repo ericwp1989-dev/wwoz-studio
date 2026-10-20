@@ -993,7 +993,7 @@ class App(tk.Tk):
                              "mapped into the open file.\nNudge them while listening;\n"
                              "the sets are cut again\non their own.", justify="left").pack(pady=8)
         if not self.guide_data:
-            ttk.Label(t, text="jazzfest2026_sets.json not found").pack()
+            ttk.Label(t, text="No Jazz Fest schedule yet (schedules/jazzfest<year>_sets.json)").pack()
         elif days:                                   # open on the first day, not an empty list
             self.g_day.set(days[0])
             self._render_guide()

@@ -985,12 +985,99 @@ FILENAME_PATTERNS = [
 ]
 
 
+# Festival schedules (Jazz Fest's official ones, the fest-*.json that cut a festival in
+# the archive, the broadcast-*.json typed in from a picture) live in the schedules folder,
+# and the program's public GitHub page keeps the same folder up to date: a robot there
+# (.github/workflows/festival-schedules.yml) adds each festival's schedule as it is posted.
+# Every copy fetches new and changed ones with the festival calendar
+# (refresh_shared_schedules) into the data folder, so nobody downloads the program again
+# for a new festival.
+
+SHARED_SCHEDULES_URL = (os.environ.get("WWOZ_SCHEDULES_URL")          # (tests: a stand-in, or "off")
+                        or "https://api.github.com/repos/ericwp1989-dev/wwoz-studio/contents/schedules")
+SHARED_DIR = DATA_DIR / "schedules"
+_SCHEDULE_FILE = re.compile(r"^(?:fest-[\w.-]+|jazzfest\d{4}_sets|broadcast-[\w.-]+)\.json$")
+
+
+def schedule_files(pattern):
+    """The schedule files matching a pattern ('fest-*.json'): in the schedules folder
+    beside the code (or beside it, as older copies had them), and fetched from the
+    program's GitHub page, which win for a name both have."""
+    found = {}
+    for d in (SCRIPT_DIR, SCRIPT_DIR / "schedules", SHARED_DIR):
+        for p in sorted(d.glob(pattern)):
+            found[p.name] = p
+    return [found[n] for n in sorted(found)]
+
+
+def _git_blob_sha(data):
+    import hashlib
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _schedule_ok(name, doc):
+    """Is a fetched schedule shaped as its kind should be (else it is not used)?"""
+    def sets_ok(sets):
+        return isinstance(sets, list) and all(isinstance(s, dict) and {"start", "end", "artist"} <= set(s)
+                                              for s in sets)
+    try:
+        if name.startswith("jazzfest"):
+            return isinstance(doc, dict) and all(re.match(r"\d{4}-\d\d-\d\d$", d) and sets_ok(v) for d, v in doc.items())
+        days = doc["days"]
+        return (isinstance(doc.get("title" if name.startswith("broadcast-") else "name"), str)
+                and all(re.match(r"\d{4}-\d\d-\d\d$", d) and sets_ok(v) for d, v in days.items()))
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def refresh_shared_schedules():
+    """Fetch the new and changed festival schedules from the program's GitHub page into
+    the data folder (JSON that is read, never run, and checked before it is used); one
+    taken off the page is dropped. Offline, what was fetched before serves. Returns how
+    many came in."""
+    if SHARED_SCHEDULES_URL == "off":
+        return 0
+    r = HTTP.get(SHARED_SCHEDULES_URL, headers=dict(UA, Accept="application/vnd.github+json"), timeout=30)
+    if r.status_code == 404:
+        listing = []
+    else:
+        r.raise_for_status()
+        listing = r.json()
+    wanted = {x["name"]: x for x in listing if isinstance(x, dict) and x.get("type") == "file"
+              and _SCHEDULE_FILE.match(x.get("name", ""))}
+    SHARED_DIR.mkdir(parents=True, exist_ok=True)
+    got = 0
+    for name, x in wanted.items():
+        p = SHARED_DIR / name
+        if p.exists() and _git_blob_sha(p.read_bytes()) == x.get("sha"):
+            continue
+        d = HTTP.get(x["download_url"], headers=UA, timeout=60)
+        d.raise_for_status()
+        try:
+            ok = _schedule_ok(name, json.loads(d.content.decode("utf-8")))
+        except ValueError:
+            ok = False
+        if not ok:
+            out(f"  (a festival schedule from GitHub, {name}, wasn't in the expected form and is not used)")
+            continue
+        tmp = p.with_name(p.name + ".partial")
+        tmp.write_bytes(d.content)
+        os.replace(tmp, p)
+        got += 1
+    for p in SHARED_DIR.glob("*.json"):
+        if p.name not in wanted:
+            p.unlink(missing_ok=True)
+    if got:
+        out(f"  {got} festival schedule(s) updated from WWOZ Studio's GitHub page")
+    return got
+
+
 def load_fest_schedule():
-    """Every festival day we have a schedule for: {'YYYY-MM-DD': [set, …]}, merged
-    from each jazzfest*_sets.json beside the code (parse_jazzfest_schedule.py makes
-    one from the festival's official schedule PDF)."""
+    """Every festival day we have Jazz Fest's official schedule for: {'YYYY-MM-DD': [set,
+    …]}, merged from each jazzfest*_sets.json (see schedule_files; parse_jazzfest_schedule.py
+    makes one from the festival's official schedule PDF)."""
     days = {}
-    for p in sorted(SCRIPT_DIR.glob("jazzfest*_sets.json")):
+    for p in schedule_files("jazzfest*_sets.json"):
         try:
             days.update(json.loads(p.read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
@@ -1855,7 +1942,7 @@ def cmd_programs(args):
 # WWOZ carries some festivals live in place of its regular shows (the Crescent City
 # Blues & BBQ Festival, for one). The archive keeps each broadcast under the regular
 # show's file name; only its title says what aired: "Live from the Crescent City
-# Blues and BBQ Fest: Marc Stone, Kenny Brown". A fest-*.json beside the code holds
+# Blues and BBQ Fest: Marc Stone, Kenny Brown". A fest-*.json (in the schedules folder) holds
 # the festival's set times, which name the sets and say where to cut them.
 
 def show_info_path(path):
@@ -1918,7 +2005,7 @@ def load_broadcast_festivals():
     the code, or one written from WWOZ's broadcast list (fest-auto-*.json in the data
     folder; see update_auto_festivals)."""
     fests = []
-    for p in sorted(SCRIPT_DIR.glob("fest-*.json")) + sorted(DATA_DIR.glob("fest-auto-*.json")):
+    for p in schedule_files("fest-*.json") + sorted(DATA_DIR.glob("fest-auto-*.json")):
         try:
             fests.append(json.loads(p.read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
@@ -2248,7 +2335,7 @@ def cmd_festival(args):
     if args.name:
         fests = [f for f in fests if loose(args.name) in loose(f["name"] + " " + f.get("short", ""))]
     if not fests:
-        sys.exit("No festival schedule matches (fest-*.json beside wwoz.py).")
+        sys.exit("No festival schedule matches (fest-*.json in the schedules folder).")
     dest_dir = download_dir_from_config(load_config())
     for f in fests:
         if not festival_files(f, dest_dir):
@@ -2449,7 +2536,7 @@ FESTIVAL_TASK = os.environ.get("WWOZ_FESTIVAL_TASK") or "WWOZ Festival Recording
 FESTIVAL_AGENT = os.environ.get("WWOZ_FESTIVAL_AGENT") or "local.wwoz-studio.festival"  #  name)
 # set only while testing: a scheduled recording made then keeps to the test's folders
 _CARRIED = ("WWOZ_DATA", "WWOZ_RECORDINGS", "WWOZ_ARCHIVE_URL", "WWOZ_LIVE_CALENDAR_URL", "WWOZ_STREAM_URL",
-            "WWOZ_NO_REPORTS", "WWOZ_REPORT_URL")
+            "WWOZ_NO_REPORTS", "WWOZ_REPORT_URL", "WWOZ_SCHEDULES_URL")
 _WHEN = re.compile(r"(\w+ \d{1,2}, \d{4}) - (\d{1,2}:\d{2}[ap]m) to "
                    r"(?:(?:\w+day, )?(\w+ \d{1,2}, \d{4}) - )?(\d{1,2}:\d{2}[ap]m)")
 
@@ -2550,6 +2637,10 @@ def festival_calendar(refresh=False, max_age=timedelta(hours=6)):
         except Exception as e:
             out(f"  couldn't read WWOZ's live broadcast calendar ({e}); the saved copy is used")
         else:
+            try:
+                refresh_shared_schedules()
+            except Exception as e:
+                out(f"  couldn't fetch the festival schedules from GitHub ({e})")
             try:
                 refresh_set_lists([e for e in events if is_festival_broadcast(e)])
             except Exception as e:
@@ -3012,7 +3103,7 @@ def broadcast_schedule():
     code. Each set: start, end, artist, label (the name its file gets: the artist, and
     where the set was recorded when the list says), stage, note, festival, on_air."""
     by_day = {}
-    for p in sorted(SCRIPT_DIR.glob("broadcast-*.json")):
+    for p in schedule_files("broadcast-*.json"):
         try:
             doc = json.loads(p.read_text(encoding="utf-8"))
             for day, sets in doc["days"].items():
@@ -3164,7 +3255,7 @@ def update_auto_festivals(dest_dir=None):
 
 def _hand_made_festivals():
     fests = []
-    for p in sorted(SCRIPT_DIR.glob("fest-*.json")):
+    for p in schedule_files("fest-*.json"):
         try:
             fests.append(json.loads(p.read_text(encoding="utf-8")))
         except (OSError, ValueError):

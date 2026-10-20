@@ -24,7 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if len(sys.argv) < 2:
     sys.exit(__doc__)
 PDF = sys.argv[1]
-OUT = sys.argv[2] if len(sys.argv) > 2 else None   # default: jazzfest<year>_sets.json beside this script
+OUT = sys.argv[2] if len(sys.argv) > 2 else None   # default: schedules/jazzfest<year>_sets.json beside this script
 
 STAGE_NAMES = {   # header text -> name used in the toolkit (matches the old file)
     "festival stage": "Festival Stage",
@@ -165,7 +165,7 @@ def main():
             s["end_estimated"] = True
         out[day] = sets
         print(f"{day}: {len(stages)} stages, {len(sets)} sets")
-    dest = Path(OUT) if OUT else Path(__file__).resolve().parent / f"jazzfest{min(out)[:4]}_sets.json"
+    dest = Path(OUT) if OUT else Path(__file__).resolve().parent / "schedules" / f"jazzfest{min(out)[:4]}_sets.json"
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1, ensure_ascii=False)
     print(f"wrote {dest}")

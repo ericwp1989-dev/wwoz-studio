@@ -1,0 +1,60 @@
+# The schedule robot: every morning it reads WWOZ's festival calendar (and Jazz Fest's
+# official schedule once it is posted) and keeps the schedules folder up to date
+# (ci/find_schedules.py). Every copy of WWOZ Studio fetches that folder on its own, so
+# friends get each new festival's schedule without downloading the program again. A
+# schedule posted only as a picture the robot can't read reliably opens an issue here
+# instead, for someone to type it in.
+name: Festival schedules
+
+on:
+  schedule:
+    - cron: "23 11 * * *"         # about 6 AM in New Orleans
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  schedules:
+    # only on the public page (the private working copy has no daily robot)
+    if: github.repository == 'ericwp1989-dev/wwoz-studio'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tesseract and the Python packages
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr
+          pip install -q requests tzdata pdfplumber pypdfium2 pillow
+      - name: Look for schedules
+        id: find
+        run: |
+          set +e
+          python ci/find_schedules.py schedules
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" = 0 ] || [ "$code" = 3 ]
+      - name: Save what changed
+        run: |
+          git config user.name "WWOZ Studio schedule robot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add schedules
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -m "Festival schedules: $(git diff --cached --name-only | sed 's|schedules/||' | paste -sd, -)"
+          git push
+      - name: Ask for a schedule to be typed in
+        if: steps.find.outputs.code == '3'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while read -r line; do
+            title="Schedule needs typing in: ${line%%:*}"
+            if gh issue list --state open --search "\"$title\" in:title" --json title --jq '.[].title' | grep -qxF "$title"; then
+              continue
+            fi
+            gh issue create --title "$title" --body "WWOZ posted this festival's schedule only as a picture, and the schedule robot couldn't read it reliably (${line#*: }). Type it into schedules/broadcast-<festival>.json, in the form of broadcast-festing-in-place-2026.json, and every copy of WWOZ Studio picks it up on its own."
+          done < needs-typing.txt

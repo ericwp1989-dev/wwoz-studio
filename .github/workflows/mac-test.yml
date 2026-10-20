@@ -27,6 +27,8 @@ jobs:
       # festival recordings aren't scheduled on the test Mac, except by the one check that
       # schedules one under a test name and removes it
       WWOZ_NO_SCHEDULE: "1"
+      # nor are festival schedules fetched from the public page (a check has a stand-in)
+      WWOZ_SCHEDULES_URL: "off"
     defaults:
       run:
         shell: bash
@@ -84,3 +86,28 @@ jobs:
         with:
           name: mac-test-${{ matrix.os }}
           path: out/
+
+  # the schedule robot (.github/workflows/festival-schedules.yml) on the Linux it runs on:
+  # reading Festing in Place's schedule picture, Jazz Fest's official PDF, a dry run
+  robot:
+    name: schedule robot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tesseract and the Python packages
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr
+          pip install -q requests tzdata pdfplumber pypdfium2 pillow
+      - name: Check the robot
+        run: python ci/test_robot.py out-robot 2>&1 | tee robot.log; exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: schedule-robot
+          path: |
+            out-robot/
+            robot.log
