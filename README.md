@@ -130,8 +130,9 @@ time, and the line under the song list says what it is doing:
   each performance is named from their words (20 to 40 minutes per day, at low priority).
 - Every recording is cut into its sets and whole shows. After you fix a name by hand, it
   is cut again two minutes later, so a few quick fixes make one new cut.
-- It looks in WWOZ's archive once an hour and downloads any new festival broadcast (see
-  the next section).
+- It looks in WWOZ's archive once an hour and downloads any new festival broadcast, and
+  when a festival on WWOZ's live broadcast calendar is on the air, it makes sure it is
+  being recorded (see "Festivals, on their own").
 - Festival broadcasts are cut into sets when they are downloaded, if the app has the
   festival's set times.
 - Every download gets a Shazam scan for songs the DJ didn't log, only while nothing is
@@ -157,11 +158,34 @@ ones it downloaded before the file was there.
 
 ## Festivals, on their own
 
-WWOZ broadcasts several New Orleans festivals live, in place of its regular shows, and its
-archive keeps those broadcasts for two weeks only. So WWOZ Studio downloads them without
-being asked, and no favorite needs checking: the Sunday download gets every new festival
-broadcast in the archive, and while the app is open it looks in the archive once an hour
-and downloads any new one in the background.
+WWOZ broadcasts several New Orleans festivals live, in place of its regular shows. WWOZ
+Studio gets them without being asked, and no favorite needs checking. It gets them one of
+two ways, because WWOZ treats festivals two ways.
+
+**Festivals WWOZ doesn't keep, such as Jazz Fest, are recorded as they air.** WWOZ's
+two-week archive leaves out some of its special live broadcasts for legal reasons, and
+Jazz Fest is one of them, so once a Jazz Fest day is over it can't be downloaded. WWOZ
+lists its festival broadcasts ahead of time on its Live Event Broadcasts calendar
+(wwoz.org, under Events), one entry per day with the hours; Jazz Fest 2026 was listed a
+month early. The app reads that calendar every few hours while it's open, and the Sunday
+download reads it every week. For each festival day on it, the computer records WWOZ's
+live stream from ten minutes before the listed start until half an hour after the listed
+end, whether or not the app is open: on Windows a task called "WWOZ Festival Recording"
+starts the recording and wakes the computer from sleep if it has to, and on a Mac a job
+called `local.wwoz-studio.festival` starts it. The computer must be switched on, though
+asleep is fine on Windows; a Mac has to be awake. If the computer comes on partway
+through a festival day, it records the rest. A recorded day is about 500 MB, so the eight
+days of Jazz Fest come to about 4 GB. The recording lands in your recordings folder, named
+for the festival, and the library lists it under Full recordings, under the festival's
+name; a Jazz Fest day is then cut into its sets as described under "The library", once the
+app has that year's Jazz Fest schedule.
+
+**Festivals WWOZ does keep, such as the Crescent City Blues & BBQ Fest, are downloaded
+from its archive**, which holds them for two weeks: the Sunday download gets every new
+festival broadcast in the archive, and while the app is open it looks in the archive once
+an hour and downloads any new one in the background. A festival on the calendar is
+recorded too until the archive shows that it keeps it; the recording then stops and is
+removed, so nothing is kept twice.
 
 A slot counts as a festival broadcast when the archive titles it "Live from" a festival
 (a name with Fest or Festival in it), as in "Live from the Crescent City Blues and BBQ
@@ -176,18 +200,20 @@ version first ran on the computer, and leaves alone the ones already in the arch
 day, so a new install doesn't suddenly fetch two weeks of festivals. Each broadcast is
 downloaded once, so deleting it later doesn't bring it back.
 
-Each two-hour broadcast is about 115 MB. A three-day festival like the Blues & BBQ Fest
-comes to about 14 of them, close to 2 GB, and cutting it into sets makes copies that take
-about as much again.
+Each two-hour broadcast in the archive is about 115 MB. A three-day festival like the
+Blues & BBQ Fest comes to about 14 of them, close to 2 GB, and cutting it into sets makes
+copies that take about as much again.
 
 When the app has a festival's set times, its broadcasts are cut into one file per set, as
 described under "The library". For any other festival, the broadcasts stay whole: the
 library gives the festival its own section, day by day, with each broadcast named for the
 acts in it ("Marc Stone, Kenny Brown") and for any regular show that shared the slot.
 
-To turn it off, uncheck **Also download the festivals WWOZ broadcasts live, on their
-own** at the top of the Weekly Favorites page. Turning it back on starts again from that
-day, so it still doesn't fetch the festivals already in the archive.
+To turn all of this off, uncheck **Also get the festivals WWOZ broadcasts live, on their
+own** at the top of the Weekly Favorites page; that also removes the recording task or
+job. The note under the box names the next festival on WWOZ's calendar. Turning it back
+on starts again from that day, so it still doesn't fetch the festivals already in the
+archive.
 
 ## The other pages
 
@@ -221,7 +247,12 @@ Everything also works from a terminal in this folder:
 `weekly --no-shazam` skips the Shazam scan after it. The festival downloads follow
 `auto_festivals` and `auto_festivals_from` in favorites.json, and
 `festival_downloads.json` in Documents\WWOZ Studio lists the broadcasts downloaded on
-their own.)
+their own. `festivals` lists the festival broadcasts on WWOZ's live broadcast calendar and
+schedules their recordings; `festival-record` records the one on the air now, which is
+what the computer's schedule runs. The calendar is saved in `live_broadcasts.json`, the
+recordings' log is `festival-recording.log`, and the schedule's definition is saved as
+`festival-recording-task.xml` (or `festival-recording.plist` on a Mac), all in
+Documents\WWOZ Studio.)
 Errors the app runs into are written to `wwoz_studio_errors.log` in Documents\WWOZ Studio,
 and reported by `wwoz_report.py` (what a report holds and how to turn reports off are at
 the top of that file; `"send_error_reports": false` in favorites.json or

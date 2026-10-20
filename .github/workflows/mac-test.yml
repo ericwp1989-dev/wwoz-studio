@@ -24,6 +24,9 @@ jobs:
       # error reports from this test go nowhere (nothing listens there); the report checks
       # in mac_check.py point them at a stand-in receiver of their own
       WWOZ_REPORT_URL: http://127.0.0.1:9/report
+      # festival recordings aren't scheduled on the test Mac, except by the one check that
+      # schedules one under a test name and removes it
+      WWOZ_NO_SCHEDULE: "1"
     defaults:
       run:
         shell: bash

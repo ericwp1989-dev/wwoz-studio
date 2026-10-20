@@ -401,6 +401,9 @@ class App(tk.Tk):
         self._other_scanner = False    # the Sunday task's scan lock was seen
         self._fest_queue = []          # festival broadcasts to download (wwoz.festival_picks)
         self._fest_checked = time.time() - 3600 + 60   # the archive is first looked at a minute in
+        self._cal_checked = time.time() - 6 * 3600 + 30  # WWOZ's live broadcast calendar, 30 s in
+        self._on_air = None            # the festival being recorded now (wwoz.airing_now), if any
+        self._rec_started = {}         # festival broadcast -> when the app last started its recorder
 
         self._build_ui()
         self._init_player()
@@ -414,6 +417,7 @@ class App(tk.Tk):
             self.createcommand("::tk::mac::Quit", self._on_close)
         threading.Thread(target=self._job_worker, daemon=True).start()
         self.after(3000, self._refresh_stale_schedule)
+        self.after(5000, self._watch_festival_air)
 
     # ------------------------------------------------------------------ UI --
 
@@ -1116,7 +1120,7 @@ class App(tk.Tk):
                   style="Hint.TLabel", justify="left", wraplength=px(1120)).pack(anchor="w", padx=10, pady=(0, 4))
         # the festivals WWOZ carries live, downloaded with no favorite needed (wwoz.festival_picks)
         self.fest_var = tk.BooleanVar(value=wwoz.auto_festivals_on(wwoz.load_config()))
-        ttk.Checkbutton(t, text="Also download the festivals WWOZ broadcasts live, on their own",
+        ttk.Checkbutton(t, text="Also get the festivals WWOZ broadcasts live, on their own",
                         variable=self.fest_var, command=self._fest_toggled).pack(anchor="w", padx=10)
         self.fest_hint = ttk.Label(t, text="", style="Hint.TLabel", justify="left", wraplength=px(1120))
         self.fest_hint.pack(anchor="w", padx=(32, 10), pady=(0, 8))
@@ -1343,9 +1347,11 @@ class App(tk.Tk):
             if p.suffix.lower() not in AUDIO_EXT or not p.is_file():
                 continue
             start = wwoz.start_time_from_name(p)
+            live = self._live_info(p)          # a festival recorded as it aired (wwoz.record_festival)
             items[p] = {"kind": "full", "section": "::full",
-                        "sub": f"Jazz Fest {jf_year} days" if p in jf_recordings else "Other recordings",
-                        "name": p.stem, "clock": start}
+                        "sub": (f"Jazz Fest {jf_year} days" if p in jf_recordings else
+                                f"{live['festival']}, recorded live" if live else "Other recordings"),
+                        "name": p.stem, "clock": start, "live": live}
 
         # one name per show: the episodes' own spellings vary ("Hep Cat's Ball", "New
         # Orleans Music - Saturday"), so shows whose names reduce to the same letters,
@@ -1435,11 +1441,23 @@ class App(tk.Tk):
                               "Its sets are in the festival's section of the library, and the WWOZ "
                               "shows around them are with the other episodes of those shows.")}
         st = wwoz.recording_start(p, self.duration if self.current_file == p else None) if not when else when
+        about = ("The whole recording. Its festival sets are in the Jazz Fest section and its WWOZ shows "
+                 "with the other episodes of each show." if it["sub"].startswith("Jazz Fest") else "")
+        if it.get("live"):
+            about = (f"WWOZ's broadcast of {it['live']['festival']}, recorded as it aired, since WWOZ's "
+                     "archive doesn't keep it. " + about).strip()
         return {"title": self._full_title(p, it),
                 "subtitle": f"{st:%A, %B} {st.day}, {st.year}, recorded from {clock(st)}" if st else p.name,
-                "about": ("The whole recording. Its festival sets are in the Jazz Fest section and its WWOZ "
-                          "shows with the other episodes of each show." if it["sub"].startswith("Jazz Fest")
-                          else "")}
+                "about": about}
+
+    @staticmethod
+    def _live_info(p):
+        """What a festival recorded live noted beside it (its .show.json), else None."""
+        try:
+            info = json.loads(wwoz.show_info_path(p).read_text(encoding="utf-8"))
+            return info if info.get("recorded_live") and info.get("festival") else None
+        except (OSError, ValueError, AttributeError):
+            return None
 
     @staticmethod
     def _how_named(label):
@@ -1466,6 +1484,8 @@ class App(tk.Tk):
         if p in self._fest_casts:
             parts = wwoz.broadcast_parts(wwoz.archive_title(p))
             return (parts["acts"] or p.stem).replace(" (pt ", " (part ")
+        if start and it.get("live"):                    # a festival recorded as it aired
+            return f"{it['live']['festival']}, {start:%A, %B} {start.day}"
         if start and re.match(r"(vlc-record|wwoz-live|\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2})", p.name):
             return f"{start:%A, %B} {start.day}, from {self._clock(start)}"
         return p.stem
@@ -2071,19 +2091,29 @@ class App(tk.Tk):
         cfg = wwoz.set_auto_festivals(on)
         self._show_fest_hint(cfg)
         if on:
-            self._fest_checked = 0                    # look at the archive at the next quiet moment
+            self._fest_checked = self._cal_checked = 0     # look at the next quiet moment
             first = wwoz.auto_festivals_from(cfg)
-            self.logln(f"festival broadcasts will download on their own, from {first:%B} {first.day} on")
+            self.logln(f"festival broadcasts will download or record on their own, from {first:%B} {first.day} on")
         else:
             self._fest_queue = []
-            self.logln("festival broadcasts no longer download on their own")
+            self.logln("festival broadcasts no longer download or record on their own")
 
     def _show_fest_hint(self, cfg=None):
         cfg = cfg or wwoz.load_config()
         if wwoz.auto_festivals_on(cfg):
             first = wwoz.auto_festivals_from(cfg)
-            text = (f"Every broadcast from {first:%B} {first.day} on, kept for good. A three-day "
-                    "festival is about 2 GB, and as much again once it's cut into sets.")
+            text = (f"Downloaded from WWOZ's archive from {first:%B} {first.day} on, or recorded as they "
+                    "air when the archive doesn't keep them, as with Jazz Fest. A recorded day is about 500 "
+                    "MB; a three-day festival from the archive about 2 GB, and as much again once it's cut "
+                    "into sets.")
+            coming = [e for e in wwoz.saved_festival_calendar() if e["end"] > datetime.now(wwoz.TZ)]
+            if coming:
+                days = [e for e in coming if e["title"] == coming[0]["title"]]
+                a, b = days[0]["start"], days[-1]["start"]
+                span = f"{a:%A, %B} {a.day}" + (f" to {b:%A, %B} {b.day}" if len(days) > 1 else "")
+                text += (f" Next on WWOZ's calendar: {coming[0]['title']}, {span}, from "
+                         f"{self._clock(a)} Central. " + ("Keep the Mac awake then." if MAC else
+                         "The computer needs to be on then; asleep is fine, it wakes it."))
         else:
             text = "Off: a festival broadcast downloads only if you pick it on the WWOZ Archive page."
         self.fest_hint.configure(text=text)
@@ -2357,6 +2387,9 @@ class App(tk.Tk):
                 return (f"trying the song list again for {self._describe(p)['title']}",
                         lambda p=p: wwoz.fetch_tracklist_or_mark(p), key)
         if wwoz.auto_festivals_on(wwoz.load_config()):
+            if now - self._cal_checked >= 6 * 3600:
+                return ("reading WWOZ's live broadcast calendar", self._check_live_calendar,
+                        ("calendar", "festival-calendar", now))
             for s in list(self._fest_queue):
                 key = (s["filename"], "festival-download")
                 if due(key):
@@ -2407,8 +2440,8 @@ class App(tk.Tk):
             idle = 0
             label, fn, key = job
             self.job_text = label
-            if key[1] != "festival-check":            # hourly, so it speaks only when it finds some
-                self.logln(f"on its own: {label}")
+            if key[1] not in ("festival-check", "festival-calendar"):   # regular looks: they speak
+                self.logln(f"on its own: {label}")                      # only when they find some
             try:
                 fn()
             except wwoz.ShazamQuiet:
@@ -2470,6 +2503,46 @@ class App(tk.Tk):
                        f"({', '.join(names)})")
         self._fest_queue = picks
 
+    def _check_live_calendar(self):
+        """Read WWOZ's live broadcast calendar (every six hours) and keep the computer's
+        festival recording times in step with it (see wwoz.schedule_festival_recordings)."""
+        self._cal_checked = time.time()
+        before = {e["url"] for e in wwoz.saved_festival_calendar()}
+        coming = wwoz.festival_calendar(refresh=True)
+        try:
+            wwoz.schedule_festival_recordings(coming)
+        finally:
+            self.after(0, self._show_fest_hint)
+        new = [e for e in coming if e["url"] not in before]
+        if new:
+            self.logln("on WWOZ's live broadcast calendar: " + "; ".join(
+                f"{e['title']}, {e['start']:%a %b} {e['start'].day} {self._clock(e['start'])} to "
+                f"{self._clock(e['end'])}" for e in new)
+                + ". WWOZ Studio records it as it airs, unless WWOZ's archive keeps it.")
+
+    def _watch_festival_air(self):
+        """Every half minute, apart from the background jobs (a long one mustn't hold it up):
+        if a festival on WWOZ's calendar is on the air and nothing is recording it, start
+        the recorder. It is a program of its own, so it goes on if the app is closed; the
+        computer's own schedule starts one too, and the second one leaves it to the first."""
+        try:
+            ev = None
+            if wwoz.auto_festivals_on(wwoz.load_config()):
+                ev = wwoz.airing_now(wwoz.saved_festival_calendar())
+            if ev and not wwoz.recording_under_way() and time.time() - self._rec_started.get(ev["url"], 0) > 600:
+                self._rec_started[ev["url"]] = time.time()
+                self._start_festival_recorder(ev)
+            self._on_air = ev if ev and wwoz.recording_under_way() else None
+        except Exception:
+            log_error()
+        self.after(30_000, self._watch_festival_air)
+
+    def _start_festival_recorder(self, ev):
+        wwoz.start_recorder()
+        until = ev["end"] + wwoz.RECORD_LATE
+        self.logln(f"recording WWOZ's live broadcast of {ev['title']} as it airs, until {self._clock(until)} "
+                   "Central (it goes on if you close WWOZ Studio)")
+
     def _download_festival(self, s, key):
         """Download one festival broadcast. With no connection, or while the Sunday task
         is getting the same show, it is tried again an hour later."""
@@ -2517,6 +2590,10 @@ class App(tk.Tk):
             text = "Waiting while the Sunday download scans with Shazam"
         else:
             text = "Song lists, sets and Shazam scans are all up to date"
+        if self._on_air:                             # a festival recording goes on beside it all
+            ev = self._on_air
+            text = (f"Recording {ev['title']} as it airs, until "
+                    f"{self._clock(ev['end'] + wwoz.RECORD_LATE)}.  " + text)
         if self.scan_lbl.cget("text") != text:
             self.scan_lbl.config(text=text)
 

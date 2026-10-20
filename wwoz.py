@@ -12,6 +12,8 @@ Commands:
   autocut FILE              Find and name the performances in a festival-day recording
   programs FILE             Mark WWOZ program changes outside festival hours
   festival                  Mark and cut a broadcast festival's downloads into one file per set
+  festivals                 The festival broadcasts WWOZ has announced, and when they are recorded
+  festival-record           Record the festival on the air now (the computer's schedule runs it)
   record                    Record the live stream
   weekly                    Download all new episodes of your favorite shows (favorites.json),
                             and every new broadcast of a festival WWOZ carries live
@@ -31,10 +33,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 try:
@@ -2293,6 +2297,11 @@ def set_auto_festivals(on):
         cfg["auto_festivals_from"] = f"{datetime.now(TZ):%Y-%m-%d}"
     cfg["auto_festivals"] = bool(on)
     save_config(cfg)
+    if not on:                     # and no more live recordings (on again, the app schedules them)
+        try:
+            schedule_festival_recordings([])
+        except Exception:
+            pass
     return cfg
 
 
@@ -2415,16 +2424,441 @@ def broadcast_info(path, fests=None):
     return None
 
 
+# ------------------------------------------------- festivals on the air ---
+# Some festivals never reach the archive. WWOZ says some of its special live broadcasts
+# "may not be included in the archive due to legal restrictions", and Jazz Fest is one,
+# so those have to be recorded while they air. WWOZ lists its festival broadcasts ahead
+# of time on its Live Event Broadcasts calendar, one entry a day with its hours (Jazz
+# Fest 2026 went up a month early); its program schedule and Spinitron show only the
+# regular shows. That calendar is the map: read by the app every few hours and by the
+# Sunday task, it sets the times the computer records. The recording is its own program
+# (`wwoz.py festival-record`), started by a Windows task that may wake the computer, or a
+# Mac launch job, or by the app when it is open while a festival is on; it records from
+# ten minutes before the listed start until half an hour after the listed end. A
+# festival the archive does keep (the Blues & BBQ Fest) is noticed while it records: the
+# recording then stops and is removed, and the archive downloads above take over.
+
+LIVE_CALENDAR_URL = os.environ.get("WWOZ_LIVE_CALENDAR_URL") or WWOZ + "/calendar/live-broadcast"  # (tests)
+LIVE_CALENDAR_PATH = DATA_DIR / "live_broadcasts.json"
+RECORDING_LOCK = DATA_DIR / "festival-recording.lock"
+RECORDING_LOG = DATA_DIR / "festival-recording.log"
+RECORD_EARLY, RECORD_LATE = timedelta(minutes=10), timedelta(minutes=30)
+ARCHIVE_LOOK = 20 * 60          # while recording, how often to see whether the archive keeps it
+FESTIVAL_TASK = os.environ.get("WWOZ_FESTIVAL_TASK") or "WWOZ Festival Recording"      # (tests: another
+FESTIVAL_AGENT = os.environ.get("WWOZ_FESTIVAL_AGENT") or "local.wwoz-studio.festival"  #  name)
+# set only while testing: a scheduled recording made then keeps to the test's folders
+_CARRIED = ("WWOZ_DATA", "WWOZ_RECORDINGS", "WWOZ_ARCHIVE_URL", "WWOZ_LIVE_CALENDAR_URL", "WWOZ_STREAM_URL",
+            "WWOZ_NO_REPORTS", "WWOZ_REPORT_URL")
+_WHEN = re.compile(r"(\w+ \d{1,2}, \d{4}) - (\d{1,2}:\d{2}[ap]m) to "
+                   r"(?:(?:\w+day, )?(\w+ \d{1,2}, \d{4}) - )?(\d{1,2}:\d{2}[ap]m)")
+
+
+def parse_live_calendar(page):
+    """The broadcasts on a page of WWOZ's Live Event Broadcasts calendar that list a start
+    and an end ("Thursday, October 22, 2026 - 11:00am to 7:00pm"): [{'title', 'start',
+    'end', 'place', 'url'}]. A studio session or a talk lists a start only."""
+    events = []
+    for blk in re.split(r'<div id="node-\d+"\s+class="node node-event', page)[1:]:
+        title = re.search(r'<h2>\s*<a href="(/events/\d+)">([^<]+)</a>', blk)
+        when = re.search(r'field-name-field-event-date.*?(<span\s+class="date-display-single">.*?)</div>', blk, re.S)
+        if not (title and when):
+            continue
+        m = _WHEN.search(re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", when.group(1)))))
+        if not m:
+            continue
+        day0, t0, day1, t1 = m.groups()
+        try:
+            start = datetime.strptime(f"{day0} {t0}", "%B %d, %Y %I:%M%p").replace(tzinfo=TZ)
+            end = datetime.strptime(f"{day1 or day0} {t1}", "%B %d, %Y %I:%M%p").replace(tzinfo=TZ)
+        except ValueError:
+            continue
+        if end <= start:                       # on past midnight
+            end += timedelta(days=1)
+        place = re.search(r'node-organization.*?<h2>\s*<a href="[^"]*">([^<]+)</a>', blk, re.S)
+        events.append({"title": html.unescape(title.group(2)).strip(), "start": start, "end": end,
+                       "place": html.unescape(place.group(1)).strip() if place else "",
+                       "url": WWOZ + title.group(1)})
+    return events
+
+
+def is_festival_broadcast(ev):
+    """A festival day on the calendar (Jazz Fest, Festing in Place, the Crescent City Blues
+    & BBQ Fest), as opposed to a video stream, a studio session or a talk."""
+    t = ev["title"].lower()
+    return "fest" in t and not t.startswith("video")
+
+
+def fetch_live_calendar():
+    """Every broadcast with hours on WWOZ's Live Event Broadcasts calendar, all pages."""
+    events, url, seen = [], LIVE_CALENDAR_URL, set()
+    while url and url not in seen and len(seen) < 8:
+        seen.add(url)
+        r = HTTP.get(url, headers=UA, timeout=60)
+        r.raise_for_status()
+        if "Live Event Broadcasts" not in r.text:
+            raise ToolError("WWOZ's live broadcast calendar didn't look the usual way (wwoz.org may "
+                            "have changed it), so festival recordings couldn't be planned")
+        events += parse_live_calendar(r.text)
+        url = next((urljoin(url, html.unescape(u)) for u in re.findall(r'href="([^"]*live-broadcast\?page=\d+)"', r.text)
+                    if urljoin(url, html.unescape(u)) not in seen), None)
+    return events
+
+
+def _event_json(e):
+    return dict(e, start=e["start"].isoformat(), end=e["end"].isoformat())
+
+
+def saved_festival_calendar():
+    """The festival broadcasts still to come or on the air, from the copy last saved
+    (live_broadcasts.json in the data folder); never touches the network."""
+    try:
+        saved = json.loads(LIVE_CALENDAR_PATH.read_text(encoding="utf-8"))
+        events = [dict(e, start=datetime.fromisoformat(e["start"]), end=datetime.fromisoformat(e["end"]))
+                  for e in saved.get("events", [])]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+    now = datetime.now(TZ)
+    return sorted((e for e in events if is_festival_broadcast(e) and e["end"] + RECORD_LATE > now),
+                  key=lambda e: e["start"])
+
+
+def festival_calendar(refresh=False, max_age=timedelta(hours=6)):
+    """The festival broadcasts still to come or on the air (saved_festival_calendar),
+    read again from wwoz.org first when the saved copy is older than max_age. A broadcast
+    already under way is kept even if the calendar no longer lists it (it may list only
+    what hasn't begun), so a computer switched on mid-festival still records the rest.
+    Offline, the saved copy serves."""
+    try:
+        saved = json.loads(LIVE_CALENDAR_PATH.read_text(encoding="utf-8"))
+        age = datetime.now(TZ) - datetime.fromisoformat(saved["fetched"])
+    except (OSError, ValueError, KeyError, TypeError):
+        saved, age = {}, None
+    if refresh or age is None or age >= max_age:
+        try:
+            events = fetch_live_calendar()
+            now = datetime.now(TZ)
+            listed = {e["url"] for e in events}
+            old = {e.get("url"): e for e in saved.get("events", [])}
+            begun = [e for e in old.values() if e.get("url") not in listed
+                     and datetime.fromisoformat(e["start"]) <= now < datetime.fromisoformat(e["end"]) + RECORD_LATE]
+            events = [dict(e, archived=True) if old.get(e["url"], {}).get("archived") else e for e in events]
+            saved = dict(saved, fetched=now.isoformat(), source=LIVE_CALENDAR_URL,
+                         events=[_event_json(e) for e in events] + begun)
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(LIVE_CALENDAR_PATH, json.dumps(saved, indent=1, ensure_ascii=False))
+        except Exception as e:
+            out(f"  couldn't read WWOZ's live broadcast calendar ({e}); the saved copy is used")
+    return saved_festival_calendar()
+
+
+def airing_now(events, now=None):
+    """The festival broadcast to be recording now (from ten minutes before its listed start
+    until half an hour after its listed end), or None."""
+    now = now or datetime.now(TZ)
+    return next((e for e in events if e["start"] - RECORD_EARLY <= now < e["end"] + RECORD_LATE
+                 and not e.get("archived")), None)
+
+
+def _note_archived(ev):
+    """Remember that the archive keeps this broadcast, so nothing starts recording it again."""
+    try:
+        saved = json.loads(LIVE_CALENDAR_PATH.read_text(encoding="utf-8"))
+        for e in saved.get("events", []):
+            if e.get("url") == ev.get("url"):
+                e["archived"] = True
+        write_text_atomic(LIVE_CALENDAR_PATH, json.dumps(saved, indent=1, ensure_ascii=False))
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def recording_under_way():
+    """Is a festival recording running now (a scheduled one, or one the app started)?"""
+    try:
+        pid = int(RECORDING_LOCK.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return False
+    return bool(pid) and _process_alive(pid)
+
+
+def festival_archived(ev):
+    """Has WWOZ put this festival in its two-week archive: a slot of the day, from two
+    hours before the listed start, titled as a festival? Then the archive downloads get
+    it, and recording it is not needed. (Never, when those downloads are turned off.)"""
+    if not auto_festivals_on(load_config()):
+        return False
+    try:
+        shows = fetch_archive_shows()
+    except Exception:
+        return False
+    return any(s["start"] and ev["start"] - timedelta(hours=2) <= s["start"] < ev["end"]
+               and festival_named(s["title"]) for s in shows)
+
+
+def record_festival(ev, stop_flag=None):
+    """Record a festival broadcast from now until half an hour after its listed end, into
+    the recordings folder, unless a festival recording is under way already. Stops, and
+    removes what it recorded, if the archive turns out to keep this festival. Returns
+    the recording, or None."""
+    try:
+        fd = os.open(RECORDING_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if recording_under_way():
+            out("  a festival recording is under way already")
+            return None
+        RECORDING_LOCK.unlink(missing_ok=True)           # left by one that was cut off
+        fd = os.open(RECORDING_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    _HELD_LOCKS.add(RECORDING_LOCK)
+    try:
+        if festival_archived(ev):
+            _note_archived(ev)
+            out(f"WWOZ keeps {ev['title']} in its two-week archive, so it is downloaded from there "
+                "instead of recorded.")
+            return None
+        start = datetime.now(TZ)
+        until = ev["end"] + RECORD_LATE
+        dest = RECORDINGS_DIR / live_file_name(start, ev["title"])
+        info = {"title": ev["title"], "festival": ev["title"], "place": ev.get("place", ""),
+                "listed": f"{ev['start']:%Y-%m-%d %H:%M} to {ev['end']:%H:%M}", "recorded_live": True}
+        show_info_path(dest).write_text(json.dumps(info, indent=1, ensure_ascii=False), encoding="utf-8")
+        out(f"Recording WWOZ's live broadcast of {ev['title']} until {until:%I:%M %p} Central: {dest.name}")
+        stop, result = threading.Event(), {}
+
+        def run():
+            try:
+                result["path"] = record_stream((until - start).total_seconds() / 3600, RECORDINGS_DIR,
+                                               stop_flag=stop, dest=dest)
+            except Exception as e:
+                result["error"] = e
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        look = time.time() + ARCHIVE_LOOK
+        while t.is_alive():
+            t.join(timeout=5)
+            if stop_flag and stop_flag.is_set():
+                stop.set()
+            elif t.is_alive() and time.time() >= look:
+                look = time.time() + ARCHIVE_LOOK
+                if festival_archived(ev):
+                    _note_archived(ev)
+                    stop.set()
+                    t.join(timeout=60)
+                    dest.unlink(missing_ok=True)
+                    show_info_path(dest).unlink(missing_ok=True)
+                    out(f"WWOZ is keeping {ev['title']} in its two-week archive, so the recording stopped "
+                        "and was removed; the festival is downloaded from the archive instead.")
+                    return None
+        if "error" in result:
+            raise result["error"]
+        return dest
+    finally:
+        RECORDING_LOCK.unlink(missing_ok=True)
+        _HELD_LOCKS.discard(RECORDING_LOCK)
+
+
+def schedule_festival_recordings(events):
+    """Have the computer start `wwoz.py festival-record` ten minutes before each festival
+    broadcast still to come, whether WWOZ Studio is open or not: a Windows task that may
+    wake the computer from sleep, or a Mac launch job (which can't wake a sleeping Mac,
+    and runs when it wakes). Done again only when the times change; with none left it is
+    removed. Its definition is also saved in the data folder. WWOZ_NO_SCHEDULE (tests)
+    saves the definition only. Returns the start times."""
+    now = datetime.now(TZ)
+    # (a start already passed stays until that broadcast is over: the times, and so the
+    # schedule, don't change while it is being recorded)
+    times = sorted({e["start"] - RECORD_EARLY for e in events if e["end"] + RECORD_LATE > now})
+    env = {k: os.environ[k] for k in _CARRIED if os.environ.get(k)}
+    want = {"times": [t.isoformat() for t in times], "program": str(SCRIPT_DIR), "env": env,
+            "name": FESTIVAL_TASK if os.name == "nt" else FESTIVAL_AGENT}
+    try:
+        saved = json.loads(LIVE_CALENDAR_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    if saved.get("scheduled") == want:
+        return times
+    if os.name == "nt":
+        _schedule_windows(times, env)
+    elif sys.platform == "darwin":
+        _schedule_mac(times, env)
+    saved["scheduled"] = want
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(LIVE_CALENDAR_PATH, json.dumps(saved, indent=1, ensure_ascii=False))
+    return times
+
+
+def _xml(s):
+    return html.escape(str(s), quote=True)
+
+
+def _schedule_windows(times, env):
+    copy = DATA_DIR / "festival-recording-task.xml"
+    if not times:
+        copy.unlink(missing_ok=True)
+        if not os.environ.get("WWOZ_NO_SCHEDULE"):
+            subprocess.run(["schtasks", "/Delete", "/TN", FESTIVAL_TASK, "/F"], capture_output=True,
+                           creationflags=NOWIN)
+        return
+    pyw = Path(sys.executable).with_name("pythonw.exe")       # no console window
+    cmd = str(pyw if pyw.exists() else sys.executable)
+    args = f'"{SCRIPT_DIR / "wwoz.py"}" --log "{RECORDING_LOG}" festival-record --launch'
+    if env:                                       # testing: run with the test's folders
+        sets = "".join(f'set "{k}={v}"&& ' for k, v in env.items())
+        cmd, args = os.environ.get("COMSPEC", "cmd.exe"), f'/c {sets}start "" "{cmd}" {args}'
+    triggers = "".join(f"<TimeTrigger><StartBoundary>{t.isoformat()}</StartBoundary><Enabled>true</Enabled>"
+                       f"</TimeTrigger>" for t in times)
+    copy.write_text(f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>WWOZ Studio: records the festivals WWOZ broadcasts live that its archive doesn't keep, at the times on wwoz.org's Live Event Broadcasts calendar. Turn it off on WWOZ Studio's Weekly Favorites page.</Description>
+  </RegistrationInfo>
+  <Triggers>{triggers}</Triggers>
+  <Principals>
+    <Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <WakeToRun>true</WakeToRun>
+    <ExecutionTimeLimit>PT30M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{_xml(cmd)}</Command>
+      <Arguments>{_xml(args)}</Arguments>
+      <WorkingDirectory>{_xml(SCRIPT_DIR)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+""", encoding="utf-16")
+    if os.environ.get("WWOZ_NO_SCHEDULE"):
+        return
+    r = subprocess.run(["schtasks", "/Create", "/TN", FESTIVAL_TASK, "/XML", str(copy), "/F"],
+                       capture_output=True, text=True, errors="replace", creationflags=NOWIN)
+    if r.returncode:
+        raise ToolError(f"the festival recordings couldn't be scheduled in Windows "
+                        f"({(r.stderr or r.stdout).strip()})")
+
+
+def _schedule_mac(times, env):
+    copy = DATA_DIR / "festival-recording.plist"
+    agent = Path.home() / "Library" / "LaunchAgents" / f"{FESTIVAL_AGENT}.plist"
+    live = not os.environ.get("WWOZ_NO_SCHEDULE")
+    if live:
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{FESTIVAL_AGENT}"], capture_output=True)
+    if not times:
+        copy.unlink(missing_ok=True)
+        if live:
+            agent.unlink(missing_ok=True)
+        return
+    when = "".join(f"<dict><key>Month</key><integer>{t.month}</integer><key>Day</key><integer>{t.day}</integer>"
+                   f"<key>Hour</key><integer>{t.hour}</integer><key>Minute</key><integer>{t.minute}</integer>"
+                   f"</dict>" for t in (t.astimezone() for t in times))         # the Mac's own clock
+    env = dict(env, PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    text = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{_xml(FESTIVAL_AGENT)}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{_xml(sys.executable)}</string>
+        <string>{_xml(SCRIPT_DIR / "wwoz.py")}</string>
+        <string>--log</string>
+        <string>{_xml(RECORDING_LOG)}</string>
+        <string>festival-record</string>
+        <string>--launch</string>
+    </array>
+    <key>WorkingDirectory</key><string>{_xml(SCRIPT_DIR)}</string>
+    <key>EnvironmentVariables</key>
+    <dict>{"".join(f"<key>{_xml(k)}</key><string>{_xml(v)}</string>" for k, v in env.items())}</dict>
+    <key>StartCalendarInterval</key>
+    <array>{when}</array>
+</dict>
+</plist>
+"""
+    copy.write_text(text, encoding="utf-8")
+    if live:
+        agent.parent.mkdir(parents=True, exist_ok=True)
+        agent.write_text(text, encoding="utf-8")
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(agent)], capture_output=True, text=True)
+        if r.returncode:
+            r = subprocess.run(["launchctl", "load", "-w", str(agent)], capture_output=True, text=True)
+        if r.returncode:
+            raise ToolError(f"the festival recordings couldn't be scheduled ({(r.stderr or r.stdout).strip()})")
+
+
+def start_recorder():
+    """Start `wwoz.py festival-record` as a program of its own, so the recording goes on
+    when whatever started it ends: the app being closed, or the computer's scheduled task
+    or launch job, which only launches it (a task that is changed or removed while it
+    runs is stopped, and a recording must not stop with it)."""
+    exe = Path(sys.executable)
+    if os.name == "nt":
+        pyw = exe.with_name("pythonw.exe")
+        exe, kw = (pyw if pyw.exists() else exe), {"creationflags": 0x00000008 | 0x00000200}
+    else:                                       # (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        kw = {"start_new_session": True}
+    subprocess.Popen([str(exe), str(SCRIPT_DIR / "wwoz.py"), "--log", str(RECORDING_LOG), "festival-record"],
+                     cwd=str(SCRIPT_DIR), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True, **kw)
+
+
+def cmd_festival_record(args):
+    """Started at a festival broadcast's time (by the computer's schedule or the app)."""
+    if args.launch:
+        start_recorder()
+        out("started the festival recorder")
+        return
+    cfg = load_config()
+    if not auto_festivals_on(cfg):
+        out("Festivals are turned off on the Weekly Favorites page, so nothing is recorded.")
+        schedule_festival_recordings([])
+        return
+    events = festival_calendar()           # (the schedule is left alone here: see start_recorder)
+    ev = airing_now(events)
+    if not ev:
+        out("No festival is on WWOZ right now.")
+        return
+    record_festival(ev)
+
+
+def cmd_festivals(args):
+    """What WWOZ's live broadcast calendar lists, and when this computer will record."""
+    events = festival_calendar(refresh=True)
+    if not events:
+        out(f"No festival broadcasts on WWOZ's live broadcast calendar now ({LIVE_CALENDAR_URL}).")
+    for e in events:
+        out(f"  {e['start']:%a %b %d, %I:%M %p} to {e['end']:%I:%M %p}  {e['title']}"
+            + (f"  ({e['place']})" if e.get("place") else ""))
+    if auto_festivals_on(load_config()):
+        times = schedule_festival_recordings(events)
+        if times:
+            out(f"This computer records them as they air ({len(times)} start(s) scheduled), unless the "
+                "archive turns out to keep them.")
+    else:
+        schedule_festival_recordings([])
+        out("Festivals are turned off on the Weekly Favorites page, so none of these is recorded.")
+
+
 # ---------------------------------------------------------------- record ---
 
-STREAM_URL = "https://wwoz-sc.streamguys1.com/wwoz-hi.mp3"
+STREAM_URL = os.environ.get("WWOZ_STREAM_URL") or "https://wwoz-sc.streamguys1.com/wwoz-hi.mp3"  # (tests)
 
 
-def record_stream(hours, dest_dir: Path, stop_flag=None):
+def live_file_name(start, label=""):
+    """A live recording's file name, starting with when it began (the song list and the
+    markers map onto it by that), then what it is, if anything."""
+    return f"wwoz-live-{start:%Y-%m-%d-%Hh%Mm%Ss}" + (f" {sanitize(label)}" if label else "") + ".mp3"
+
+
+def record_stream(hours, dest_dir: Path, stop_flag=None, dest=None):
     """Record the live WWOZ stream for `hours`. Filename carries the start time
     so tracklist/markers map onto it automatically. Reconnects on dropouts."""
-    start = datetime.now(TZ)
-    dest = dest_dir / f"wwoz-live-{start:%Y-%m-%d-%Hh%Mm%Ss}.mp3"
+    dest = Path(dest) if dest else Path(dest_dir) / live_file_name(datetime.now(TZ))
     end_at = time.time() + hours * 3600
     out(f"  recording live stream -> {dest.name} for {hours}h "
         f"(safe to keep using the PC; stop by closing/Ctrl+C)")
@@ -2504,6 +2938,15 @@ def cmd_weekly(args):
         out("No favorites enabled yet. Check some shows in WWOZ Studio's Weekly Favorites tab")
         out("(or set \"enabled\": true in favorites.json), then re-run.")
         return
+    if auto_festivals_on(cfg):                  # the festivals that air but aren't archived
+        try:
+            coming = festival_calendar(refresh=True)
+            schedule_festival_recordings(coming)
+            out("Festival broadcasts on WWOZ's calendar, recorded as they air unless the archive keeps them: "
+                + ("; ".join(f"{e['title']} {e['start']:%b %d}" for e in coming) if coming else "none now"))
+        except Exception as e:
+            out(f"    couldn't schedule the festival recordings: {e}")
+            report_error("festival schedule")
     shows = fetch_archive_shows()
     remember_titles(shows, dest_dir)
     new = [s for s in shows
@@ -2648,6 +3091,14 @@ def main():
     pg = sub.add_parser("programs", help="mark WWOZ program changes outside fest hours")
     pg.add_argument("file")
     pg.set_defaults(fn=cmd_programs)
+
+    sub.add_parser("festivals", help="the festival broadcasts on WWOZ's live broadcast calendar, and when "
+                                     "this computer records them").set_defaults(fn=cmd_festivals)
+    fr = sub.add_parser("festival-record", help="record the festival on WWOZ now, if one is (the computer's "
+                                                "schedule runs this)")
+    fr.add_argument("--launch", action="store_true", help="start the recording as a program of its own and "
+                                                          "return at once (what the schedule does)")
+    fr.set_defaults(fn=cmd_festival_record)
 
     fe = sub.add_parser("festival", help="mark and cut a broadcast festival (fest-*.json) into one file per set")
     fe.add_argument("--name", help="part of the festival's name (default: every festival downloaded)")
