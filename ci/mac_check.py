@@ -400,8 +400,8 @@ def program_checks():
         shows = wwoz.fetch_archive_shows()
         check("WWOZ archive list", len(shows) > 50, f"{len(shows)} shows")
         cutoff = datetime.now(wwoz.TZ) - timedelta(hours=5)
-        pick = next(s for s in shows if s["start"] and s["start"] < cutoff
-                    and "live from" not in s["title"].lower())
+        pick = next(s for s in shows if s["start"] and s["start"] < cutoff        # (nobody logs the
+                    and not any(w in s["title"].lower() for w in ("live from", "overnight")))   # overnight songs)
         t0 = time.time()
         path = wwoz.download_show(pick, dest)
         mb = path.stat().st_size >> 20
@@ -424,7 +424,9 @@ def program_checks():
         check("Shazam answers this Mac", False, repr(e), soft=True)
 
     try:
-        folder = wwoz.split_pieces(path)
+        # a show with no song list (the DJs' log can't be reached, or nobody logged it) has
+        # nothing to cut by: cut the made-up show instead
+        folder = wwoz.split_pieces(path if wwoz.read_tracklist(path) else test_show(wwoz, dest))
         idx = wwoz.pieces_index(folder)
         check("cut into whole shows", bool(idx and idx["pieces"]),
               [(p["file"], p["songs"]) for p in idx["pieces"]] if idx else None)
