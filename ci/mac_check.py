@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -19,9 +20,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "ci"))
 OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
-MODE = "gui" if "--gui" in sys.argv else "summary" if "--summary" in sys.argv else "program"
+MODE = ("gui" if "--gui" in sys.argv else "festival-gui" if "--festival-gui" in sys.argv
+        else "summary" if "--summary" in sys.argv else "program")
 results = []
 
 
@@ -34,7 +37,10 @@ def check(name, ok, detail="", soft=False):
 
 def shot(name):
     p = OUT / f"{name}.png"
-    subprocess.run(["screencapture", "-x", str(p)], timeout=30)
+    try:
+        subprocess.run(["screencapture", "-x", str(p)], timeout=30)
+    except OSError:                  # not a Mac (a trial run of these checks elsewhere)
+        pass
     return p.exists()
 
 
@@ -169,6 +175,290 @@ def report_checks():
     srv.shutdown()
 
 
+def festival_shows():
+    """A made-up festival with no set times, around a club concert and regular shows, as
+    the archive would list it (see fake_archive.py, which serves it from this machine)."""
+    from zoneinfo import ZoneInfo
+    import fake_archive
+
+    def at(day, hour):
+        return datetime(2026, 10, day, hour, 0, 6, tzinfo=ZoneInfo("America/Chicago"))
+    S = fake_archive.show
+    return [S(at(12, 12), "Live from the Satchmo SummerFest: Too Early Brass Band", "early"),
+            S(at(14, 10), "New Orleans Music Show with DJ Test / Live from the Satchmo SummerFest: "
+                          "Treme Brass Band", "nomusic"),
+            S(at(14, 12), "Live from the Satchmo SummerFest: Kermit Ruffins, Shannon Powell (pt 1)", "kermit"),
+            S(at(14, 14), "Tudo Bem Brazilian with Paul Sample", "tudo-bem"),
+            S(at(14, 16), "Live at the Maple Leaf: Rebirth Brass Band", "maple-leaf"),
+            S(at(14, 18), "Block Party with Brice Nice", "block-party"),
+            S(at(15, 12), "Live from the Satchmo SummerFest: Doreen Ketchens / Cajun and Zydeco", "doreen")]
+
+
+FEST_WANT = {"nomusic", "kermit", "tudo-bem", "doreen"}   # not too early, not the club, not a regular show
+
+
+def fest_slug(name):
+    return name.split("-", 3)[3][:-4]
+
+
+def festival_setup(name, settings, shows=None):
+    """Scratch folders, the made-up archive and a live broadcast calendar served from this
+    machine (add entries to srv.calendar), a stand-in live stream, and the settings for a
+    run (None: a new install with no settings file). Returns (root, server, env)."""
+    import fake_archive
+    root = Path(os.environ["WWOZ_DATA"]).parent / f"festival-{name}"
+    shutil.rmtree(root, ignore_errors=True)
+    for d in ("server", "data", "rec"):
+        (root / d).mkdir(parents=True)
+    if settings is not None:
+        (root / "data" / "favorites.json").write_text(json.dumps(settings))
+    ffmpeg = shutil.which("ffmpeg") or next(p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg")
+                                             if os.access(p, os.X_OK))
+    tone = fake_archive.tone(ffmpeg, root / "server" / "tone.mp3", 30)
+    shows = festival_shows() if shows is None else shows
+    for s in shows:
+        os.link(tone, root / "server" / s["filename"])
+    cal = []
+    srv, url = fake_archive.serve(fake_archive.page(shows), root / "server",
+                                  live=lambda: fake_archive.live_page(cal), stream=tone)
+    srv.calendar = cal
+    env = dict(os.environ, WWOZ_DATA=str(root / "data"), WWOZ_RECORDINGS=str(root / "rec"),
+               WWOZ_ARCHIVE_URL=url, WWOZ_LIVE_CALENDAR_URL=srv.live_url, WWOZ_STREAM_URL=srv.stream_url,
+               WWOZ_NO_REPORTS="1", WWOZ_NO_SCHEDULE="1")
+    return root, srv, env
+
+
+def central_now():
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/Chicago")).replace(microsecond=0)
+
+
+def on_air_for(seconds, title="Festing in Place 2026"):
+    """A live calendar entry the recorder records now, for a minute or two (its listed end
+    is half an hour before the recording stops; the calendar shows whole minutes)."""
+    stop = (central_now() + timedelta(seconds=seconds + 59)).replace(second=0)
+    return {"title": title, "start": stop - timedelta(minutes=40), "end": stop - timedelta(minutes=30),
+            "place": "Live from the WWOZ Studio"}
+
+
+def live_checks():
+    """Festivals the archive doesn't keep are recorded as they air: the recorder on its own,
+    one the archive does keep, and the Mac's launch job starting it at the scheduled time."""
+    import signal
+    import traceback
+    import fake_archive
+
+    def record(env):
+        return subprocess.run([sys.executable, "wwoz.py", "festival-record"], cwd=HERE, env=env,
+                              capture_output=True, text=True, timeout=600)
+    try:
+        root, srv, env = festival_setup("live", {"auto_festivals": True, "auto_festivals_from": "2026-10-13",
+                                                 "favorites": []}, shows=[])
+        srv.calendar.append(on_air_for(60))
+        t0 = time.time()
+        r = record(env)
+        recs = list((root / "rec").glob("wwoz-live-*Festing in Place 2026.mp3"))
+        check("festivals on the air: the recorder records one into the recordings folder",
+              r.returncode == 0 and len(recs) == 1 and recs[0].stat().st_size > 100_000,
+              f"{[p.name for p in recs]} in {time.time() - t0:.0f} s; {(r.stdout + r.stderr)[-300:]}")
+        srv.shutdown()
+
+        ev = on_air_for(600, title="Crescent City Blues & BBQ Fest")
+        slot = fake_archive.show(ev["start"].replace(minute=0, second=6) - timedelta(hours=1),
+                                 "Live from the Crescent City Blues and BBQ Fest: Marc Stone", "cajun")
+        root, srv, env = festival_setup("live-archived", {"auto_festivals": True, "auto_festivals_from": "2026-10-13",
+                                                          "favorites": []}, shows=[slot] + festival_shows())
+        srv.calendar.append(ev)
+        r = record(env)
+        check("festivals on the air: one the archive keeps is downloaded from there, not recorded",
+              r.returncode == 0 and "two-week archive" in r.stdout and not list((root / "rec").glob("wwoz-live-*")),
+              (r.stdout + r.stderr)[-300:])
+        srv.shutdown()
+
+        # the launch job: registered under a test name, it starts the recorder at its time
+        label = "local.wwoz-studio.festival-test"
+        root, srv, env = festival_setup("launchd", {"auto_festivals": True, "auto_festivals_from": "2026-10-13",
+                                                    "favorites": []}, shows=[])
+        env = dict(env, WWOZ_FESTIVAL_AGENT=label)
+        env.pop("WWOZ_NO_SCHEDULE")
+        begin = (central_now() + timedelta(minutes=11, seconds=59)).replace(second=0)
+        srv.calendar.append({"title": "Festing in Place 2026", "start": begin, "end": begin + timedelta(minutes=1),
+                             "place": "Live from the WWOZ Studio"})
+        r = subprocess.run([sys.executable, "wwoz.py", "festivals"], cwd=HERE, env=env, capture_output=True,
+                           text=True, timeout=120)
+        agent = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+        listed = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
+        check("festivals on the air: the launch job is registered", agent.exists() and listed.returncode == 0,
+              (r.stdout + r.stderr + listed.stderr)[-400:])
+        t0 = time.time()
+        while time.time() - t0 < 240 and not list((root / "rec").glob("wwoz-live-*.mp3")):
+            time.sleep(5)
+        time.sleep(15)
+        recs = list((root / "rec").glob("wwoz-live-*.mp3"))
+        lock = root / "data" / "festival-recording.lock"
+        log = root / "data" / "festival-recording.log"
+        check("festivals on the air: at its time the launch job started the recorder",
+              bool(recs) and recs[0].stat().st_size > 50_000,
+              f"{[p.name for p in recs]} after {time.time() - t0:.0f} s; "
+              + (log.read_text()[-300:] if log.exists() else "(no log)"))
+        # WWOZ posts another festival mid-recording: the job is reloaded, the recording goes on
+        holder = int(lock.read_text().strip() or 0) if lock.exists() else 0
+        size0 = recs[0].stat().st_size if recs else 0
+        srv.calendar.append({"title": "Jazz Fest", "start": begin + timedelta(days=200),
+                             "end": begin + timedelta(days=200, hours=8), "place": "Fair Grounds Race Course"})
+        r = subprocess.run([sys.executable, "wwoz.py", "festivals"], cwd=HERE, env=env, capture_output=True,
+                           text=True, timeout=120)
+        time.sleep(15)
+        try:
+            os.kill(holder, 0)
+            alive = bool(holder)
+        except OSError:
+            alive = False
+        check("festivals on the air: reloading the launch job while it records doesn't stop the recording",
+              alive and recs and recs[0].stat().st_size > size0, f"recorder {holder} alive: {alive}; {r.stdout[-200:]}")
+        if lock.exists():                      # it would record for 40 minutes; enough
+            try:
+                os.kill(int(lock.read_text().strip()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+        srv.calendar.clear()
+        subprocess.run([sys.executable, "-c", "import wwoz; wwoz.schedule_festival_recordings([])"], cwd=HERE,
+                       env=env, capture_output=True, timeout=60)
+        gone = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
+        check("festivals on the air: with none left the launch job is removed", not agent.exists() and gone.returncode != 0)
+        srv.shutdown()
+    except Exception:
+        check("festival recordings", False, traceback.format_exc()[-600:])
+
+
+def festival_checks():
+    """Festivals WWOZ broadcasts live download on their own, by the Sunday task: never
+    the ones already in the archive on the first run, only festival slots (not a club
+    concert), the slot an act ran on into, each once, and nothing when turned off."""
+    import traceback
+
+    def weekly(env):
+        return subprocess.run([sys.executable, "wwoz.py", "weekly", "--no-shazam"], cwd=HERE, env=env,
+                              capture_output=True, text=True, timeout=600)
+    try:
+        today = datetime.now(__import__("zoneinfo").ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+        root, srv, env = festival_setup("first", None)
+        r = weekly(env)
+        cfg = json.loads((root / "data" / "favorites.json").read_text())
+        got = list((root / "rec" / "archive_downloads").glob("*.mp3"))
+        check("festivals: a first run downloads none already in the archive, and notes the day",
+              r.returncode == 0 and not got and cfg.get("auto_festivals_from") == today,
+              (r.stdout + r.stderr)[-300:])
+        srv.shutdown()
+
+        root, srv, env = festival_setup("sunday", {"auto_festivals": True, "auto_festivals_from": "2026-10-13",
+                                                   "favorites": []})
+        r = weekly(env)
+        arch = root / "rec" / "archive_downloads"
+        got = {fest_slug(p.name) for p in arch.glob("*.mp3")}
+        check("festivals: the Sunday download gets the festival's slots and the one an act ran on into, "
+              "not a club concert", r.returncode == 0 and got == FEST_WANT, f"{sorted(got)} {r.stdout[-300:]}")
+        info = json.loads(next(arch.glob("*tudo-bem.show.json")).read_text()) if got else {}
+        check("festivals: the slot after 'pt 1' notes the act", info.get("continues", {}).get("act") == "Shannon Powell",
+              info)
+        n = len(srv.requests)
+        for p in arch.glob("*kermit.mp3"):
+            p.unlink()                          # deleted after listening: not downloaded again
+        r = weekly(env)
+        check("festivals: each is downloaded once, even if deleted", r.returncode == 0
+              and not [x for x in srv.requests[n:] if x.startswith("/audio/")], r.stdout[-200:])
+        srv.shutdown()
+
+        root, srv, env = festival_setup("off", {"auto_festivals": False, "auto_festivals_from": "2026-10-13",
+                                                "favorites": []})
+        r = weekly(env)
+        check("festivals: none when turned off", r.returncode == 0
+              and not list((root / "rec" / "archive_downloads").glob("*.mp3")), r.stdout[-200:])
+        srv.shutdown()
+    except Exception:
+        check("festival downloads", False, traceback.format_exc()[-600:])
+
+
+def festival_gui_checks():
+    """The app on empty folders: its own background worker finds the festival in the
+    archive and downloads it, the library files it under the festival by day, and the
+    box on the Weekly Favorites page turns it off and on."""
+    root, srv, env = festival_setup("app", {"auto_festivals": True, "auto_festivals_from": "2026-10-13",
+                                            "send_error_reports": False, "favorites": []})
+    srv.calendar.append(on_air_for(60))                # and a festival on the air now
+    os.environ.update(env)
+    import wwoz_gui
+    wwoz_gui.App._refresh_stale_schedule = lambda self: None
+    app = wwoz_gui.App()
+    app.vol.set(0)
+    app.scan_resume_at = time.time() + 10 ** 6         # no Shazam scans here
+    app._fest_checked = app._cal_checked = 0           # look now, not a minute in
+    arch = root / "rec" / "archive_downloads"
+    lock = root / "data" / "festival-recording.lock"
+    t0 = time.time()
+    status = []
+
+    def wait():
+        if app.scan_lbl.cget("text").startswith("Recording"):
+            status.append(app.scan_lbl.cget("text"))
+        done = (len(list(arch.glob("*.mp3"))) >= len(FEST_WANT) and not app._fest_queue and not app.job_text
+                and list((root / "rec").glob("wwoz-live-*.mp3")) and not lock.exists() and time.time() - t0 > 60)
+        if done or time.time() - t0 > 300:
+            app.after(3000, finish)
+        else:
+            app.after(500, wait)
+
+    def finish():
+        try:
+            got = {fest_slug(p.name) for p in arch.glob("*.mp3")}
+            check("festivals: the app's own worker downloads them", got == FEST_WANT,
+                  f"{sorted(got)} in {time.time() - t0:.0f} s")
+            recs = list((root / "rec").glob("wwoz-live-*Festing in Place 2026.mp3"))
+            check("festivals: the app records the one on the air", len(recs) == 1 and recs[0].stat().st_size > 100_000
+                  and bool(status), f"{[p.name for p in recs]}; {status[:1]}")
+            app.refresh_library()
+            subs = [app.lib_tree.item(i, "text") for i in app.lib_tree.get_children("::full")] \
+                if app.lib_tree.exists("::full") else []
+            check("festivals: the library files the recording under the festival",
+                  "Festing in Place 2026, recorded live" in subs, subs)
+            t = app.lib_tree
+            gid = next((i for i in t.get_children("") if t.item(i, "text") == "SATCHMO SUMMERFEST 2026"), None)
+            days = {t.item(d, "text"): [t.item(x, "text") for x in t.get_children(d)]
+                    for d in (t.get_children(gid) if gid else [])}
+            check("festivals: the library lists the broadcasts under the festival, by day, named for their acts",
+                  days == {"Wednesday, October 14": ["Treme Brass Band, after New Orleans Music Show with DJ Test",
+                                                     "Kermit Ruffins, Shannon Powell (part 1)",
+                                                     "Shannon Powell (continued), then Tudo Bem Brazilian with Paul Sample"],
+                           "Thursday, October 15": ["Doreen Ketchens, then Cajun and Zydeco"]}, days)
+            app.nb.select(app.tab_player)
+            app.lift()
+            app.update()
+            shot("8-festival-library")
+            app.nb.select(app.tab_fav)
+            app.update()
+            shot("9-festival-box")
+            check("festivals: the box on the Weekly Favorites page is checked", app.fest_var.get(),
+                  app.fest_hint.cget("text"))
+            app.fest_var.set(False)
+            app._fest_toggled()
+            cfg = json.loads((root / "data" / "favorites.json").read_text())
+            check("festivals: unchecking it is saved", cfg.get("auto_festivals") is False, cfg)
+            log = root / "data" / "wwoz_studio_errors.log"
+            check("festivals: no errors logged", not log.exists() or not log.read_text().strip(),
+                  log.read_text()[-600:] if log.exists() else "")
+        except Exception:
+            import traceback
+            check("festival window checks", False, traceback.format_exc()[-600:])
+        app._closing = True
+        app.player and app.player.close()
+        app.destroy()
+    app.lift()
+    app.attributes("-topmost", True)
+    app.after(500, wait)
+    app.mainloop()
+    srv.shutdown()
+
+
 def program_checks():
     import wwoz
     check("this Mac", True, f"macOS {platform.mac_ver()[0]} on {platform.machine()}, "
@@ -232,8 +522,8 @@ def program_checks():
         shows = wwoz.fetch_archive_shows()
         check("WWOZ archive list", len(shows) > 50, f"{len(shows)} shows")
         cutoff = datetime.now(wwoz.TZ) - timedelta(hours=5)
-        pick = next(s for s in shows if s["start"] and s["start"] < cutoff
-                    and "live from" not in s["title"].lower())
+        pick = next(s for s in shows if s["start"] and s["start"] < cutoff        # (nobody logs the
+                    and not any(w in s["title"].lower() for w in ("live from", "overnight")))   # overnight songs)
         t0 = time.time()
         path = wwoz.download_show(pick, dest)
         mb = path.stat().st_size >> 20
@@ -256,7 +546,9 @@ def program_checks():
         check("Shazam answers this Mac", False, repr(e), soft=True)
 
     try:
-        folder = wwoz.split_pieces(path)
+        # a show with no song list (the DJs' log can't be reached, or nobody logged it) has
+        # nothing to cut by: cut the made-up show instead
+        folder = wwoz.split_pieces(path if wwoz.read_tracklist(path) else test_show(wwoz, dest))
         idx = wwoz.pieces_index(folder)
         check("cut into whole shows", bool(idx and idx["pieces"]),
               [(p["file"], p["songs"]) for p in idx["pieces"]] if idx else None)
@@ -265,6 +557,8 @@ def program_checks():
 
     sleep_checks(wwoz, path)
     report_checks()
+    festival_checks()
+    live_checks()
 
     junk = wwoz.RECORDINGS_DIR / f"trash-test-{int(time.time())}.txt"
     junk.write_text("x")
@@ -395,12 +689,12 @@ def gui_checks(path):
 
 def summary():
     print("## WWOZ Studio on a Mac\n")
-    for part in ("program", "gui"):
+    for part in ("program", "gui", "festival-gui"):
         f = OUT / f"{part}.json"
         if not f.exists():
             print(f"_No {part} results._\n")
             continue
-        print(f"### {'The program' if part == 'program' else 'The window'}\n")
+        print(f"### {({'program': 'The program', 'gui': 'The window'}).get(part, 'Festivals in the window')}\n")
         print("| | Check | Detail |\n|---|---|---|")
         for r in json.loads(f.read_text()):
             mark = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}[r["status"]]
@@ -412,9 +706,15 @@ if MODE == "summary":
     summary()
 elif MODE == "gui":
     gui_checks(Path(sys.argv[sys.argv.index("--gui") + 1]))
+elif MODE == "festival-gui":
+    festival_gui_checks()
 else:
     show = program_checks()
     gui = subprocess.run([sys.executable, __file__, str(OUT), "--gui", str(show)], timeout=420)
     check("the window checks ran to the end", gui.returncode == 0, f"exit code {gui.returncode}")
-    every = results + (json.loads((OUT / "gui.json").read_text()) if (OUT / "gui.json").exists() else [])
+    fgui = subprocess.run([sys.executable, __file__, str(OUT), "--festival-gui"], timeout=600)
+    check("the festival window checks ran to the end", fgui.returncode == 0 and (OUT / "festival-gui.json").exists(),
+          f"exit code {fgui.returncode}")
+    every = results + [r for part in ("gui", "festival-gui") if (OUT / f"{part}.json").exists()
+                       for r in json.loads((OUT / f"{part}.json").read_text())]
     sys.exit(1 if any(r["status"] == "FAIL" for r in every) else 0)
