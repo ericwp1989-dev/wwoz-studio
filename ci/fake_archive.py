@@ -7,6 +7,7 @@ served from this computer. wwoz.py reads it when WWOZ_ARCHIVE_URL points at it.
     srv.shutdown()
 """
 import html
+import json
 import http.server
 import re
 import subprocess
@@ -72,7 +73,20 @@ def event_page(lines):
             f'<div class="field-items"><div class="field-item even">{body}</div></div></div></body></html>')
 
 
-def serve(build, audio_dir, live=None, stream=None, events=None):
+def github_listing(folder, base):
+    """GitHub's contents listing of a folder (name, type, sha of the blob, download_url)."""
+    import hashlib
+    items = []
+    for p in sorted(Path(folder).iterdir()):
+        if p.is_file():
+            data = p.read_bytes()
+            items.append({"name": p.name, "type": "file",
+                          "sha": hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest(),
+                          "download_url": f"{base}/gh-raw/{p.name}"})
+    return items
+
+
+def serve(build, audio_dir, live=None, stream=None, events=None, github=None):
     """Serve the archive page `build(audio_url)` makes, and the mp3s in audio_dir; with
     `live`, a live broadcast calendar (a function returning the page, so a test can change
     it); with `stream`, an mp3 played as the live stream; with `events`, a function giving
@@ -84,8 +98,25 @@ def serve(build, audio_dir, live=None, stream=None, events=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             srv.requests.append(self.path)
-            page = (live() if self.path.startswith("/calendar/live-broadcast") and live else
-                    events(self.path) if self.path.startswith("/events/") and events else None)
+            if github and self.path.startswith("/gh-contents"):         # a stand-in GitHub folder
+                if not Path(github).is_dir():
+                    self.send_error(404)
+                    return
+                page = json.dumps(github_listing(github, base))
+            elif github and self.path.startswith("/gh-raw/"):
+                f = Path(github) / unquote(self.path[len("/gh-raw/"):])
+                if not f.is_file():
+                    self.send_error(404)
+                    return
+                body = f.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            else:
+                page = (live() if self.path.startswith("/calendar/live-broadcast") and live else
+                        events(self.path) if self.path.startswith("/events/") and events else None)
             if page is not None:
                 body = page.encode("utf-8")
                 self.send_response(200)
@@ -134,6 +165,7 @@ def serve(build, audio_dir, live=None, stream=None, events=None):
     srv.requests = []
     base = f"http://127.0.0.1:{srv.server_port}"
     srv.live_url, srv.stream_url = f"{base}/calendar/live-broadcast", f"{base}/stream"
+    srv.github_url = f"{base}/gh-contents/schedules"
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, f"{base}/listen/archive/"
 

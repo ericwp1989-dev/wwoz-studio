@@ -71,19 +71,33 @@ def _columns(img, want):
 
 
 def _boxes(img, left, right):
-    """The boxes down a column, [(top, bottom)], from the white insides along both edges."""
+    """The boxes down a column, [(top, bottom)]: runs of rows with white across the column
+    (even a row of bold text has white between its letters), between the coloured gaps
+    and borders that have none, with the grid's coloured gutter beside them (the white
+    page above and below the grid is no box), and about evenly sized."""
     px, h = img.load(), img.height
-    found = []
-    for x in (left + 4, right - 5):
-        runs = _runs((_white(px[x, y]) for y in range(h)), max(20, int(h * 0.012)))
-        found.append([(a, b) for a, b in runs if a > h * 0.04])
-    boxes = max(found, key=len)
-    # the white page above and below the grid is no box: a box has the grid's coloured
-    # gutter beside it, and the boxes are about evenly sized
-    boxes = [(a, b) for a, b in boxes if not _white(px[max(0, left - 6), (a + b) // 2])]
+    xs = range(left + 3, right - 3, 3)
+
+    def inside(y):
+        if _white(px[max(0, left - 6), y]):
+            return False
+        return sum(_white(px[x, y]) for x in xs) > 0.15 * len(xs)
+    boxes = _runs((inside(y) for y in range(h)), max(20, int(h * 0.012)))
     if len(boxes) > 3:
         typical = statistics.median(b - a for a, b in boxes)
         boxes = [(a, b) for a, b in boxes if 0.4 * typical <= b - a <= 2.5 * typical]
+    if len(boxes) > 3:
+        # the grid's boxes sit close together; a title above it or a note below it doesn't:
+        # keep the longest run of closely packed boxes
+        typical = statistics.median(b - a for a, b in boxes)
+        chains, chain = [], [boxes[0]]
+        for prev, box in zip(boxes, boxes[1:]):
+            if box[0] - prev[1] > max(30, 0.35 * typical):
+                chains.append(chain)
+                chain = []
+            chain.append(box)
+        chains.append(chain)
+        boxes = max(chains, key=len)
     return boxes
 
 

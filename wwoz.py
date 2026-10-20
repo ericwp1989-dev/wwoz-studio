@@ -1049,7 +1049,10 @@ def refresh_shared_schedules():
     got = 0
     for name, x in wanted.items():
         p = SHARED_DIR / name
+        rejected = SHARED_DIR / f"{name}.rejected"         # (its sha: not fetched again until it changes)
         if p.exists() and _git_blob_sha(p.read_bytes()) == x.get("sha"):
+            continue
+        if rejected.exists() and rejected.read_text(encoding="utf-8").strip() == x.get("sha"):
             continue
         d = HTTP.get(x["download_url"], headers=UA, timeout=60)
         d.raise_for_status()
@@ -1059,13 +1062,15 @@ def refresh_shared_schedules():
             ok = False
         if not ok:
             out(f"  (a festival schedule from GitHub, {name}, wasn't in the expected form and is not used)")
+            rejected.write_text(str(x.get("sha")), encoding="utf-8")
             continue
+        rejected.unlink(missing_ok=True)
         tmp = p.with_name(p.name + ".partial")
         tmp.write_bytes(d.content)
         os.replace(tmp, p)
         got += 1
-    for p in SHARED_DIR.glob("*.json"):
-        if p.name not in wanted:
+    for p in list(SHARED_DIR.glob("*.json")) + list(SHARED_DIR.glob("*.json.rejected")):
+        if p.name.removesuffix(".rejected") not in wanted:
             p.unlink(missing_ok=True)
     if got:
         out(f"  {got} festival schedule(s) updated from WWOZ Studio's GitHub page")
