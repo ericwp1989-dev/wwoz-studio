@@ -13,7 +13,8 @@ Commands:
   programs FILE             Mark WWOZ program changes outside festival hours
   festival                  Mark and cut a broadcast festival's downloads into one file per set
   record                    Record the live stream
-  weekly                    Download all new episodes of your favorite shows (favorites.json)
+  weekly                    Download all new episodes of your favorite shows (favorites.json),
+                            and every new broadcast of a festival WWOZ carries live
 
 Run  py -3.12 wwoz.py <command> --help  for options.
 """
@@ -46,7 +47,7 @@ except ImportError:          # in Python's personal package folder, which it lef
 TZ = ZoneInfo("America/Chicago")  # WWOZ local time; recordings assumed made on a Central-time PC
 NOWIN = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # no console flash from GUI
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
-ARCHIVE_URL = "https://www.wwoz.org/listen/archive/"
+ARCHIVE_URL = os.environ.get("WWOZ_ARCHIVE_URL") or "https://www.wwoz.org/listen/archive/"   # (tests: a stand-in)
 WWOZ = "https://www.wwoz.org"
 SPINITRON = "https://spinitron.com"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -145,11 +146,16 @@ DEFAULT_CONFIG = {
         "'enabled': true downloads new episodes weekly. 'recordings_dir' is the folder for",
         "your recordings (blank: 'WWOZ recordings' in Music). 'download_dir' is relative to",
         "the recordings folder unless you give an absolute path. 'send_error_reports': false",
-        "stops the error reports described in wwoz_report.py.",
+        "stops the error reports described in wwoz_report.py. 'auto_festivals': false stops",
+        "the automatic downloads of the festivals WWOZ broadcasts live; 'auto_festivals_from'",
+        "is the first day whose festival broadcasts are downloaded (the day this computer",
+        "first ran the feature, or the day it was turned back on), so the festivals already in",
+        "the archive then are never downloaded on their own.",
     ],
     "recordings_dir": "",
     "download_dir": "archive_downloads",
     "send_error_reports": True,
+    "auto_festivals": True,
     "favorites": [],
 }
 
@@ -195,7 +201,7 @@ def load_config():
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))   # -sig: Notepad's old BOM
         if not isinstance(cfg, dict):
             raise ValueError("it isn't a settings file")
-        return cfg
+        return _first_festival_day(cfg)
     except ValueError as e:
         # broken by a hand edit: keep the old file, start fresh, and say so, rather than
         # stop the app and the Sunday task from starting at all
@@ -208,7 +214,21 @@ def load_config():
                             f"new one: pick your favorite shows again on the Weekly Favorites page. "
                             f"The old file is saved as {bad}.")
         out(SETTINGS_PROBLEM)
-        return cfg
+        return _first_festival_day(cfg)
+
+
+def _first_festival_day(cfg):
+    """The first time this program runs with automatic festival downloads, note the day
+    in the settings: festivals are downloaded from that day on, never the ones already
+    sitting in the archive (a new install, or a copy updated to this version)."""
+    if not cfg.get("auto_festivals_from"):
+        cfg.setdefault("auto_festivals", True)
+        cfg["auto_festivals_from"] = f"{datetime.now(TZ):%Y-%m-%d}"
+        try:
+            save_config(cfg)
+        except OSError:
+            pass                # noted again next time; meanwhile today is the first day
+    return cfg
 
 
 def download_dir_from_config(cfg):
@@ -251,6 +271,11 @@ def report_error(kind, message=None):
 class NoStartTime(ToolError):
     """A recording whose name doesn't say when it was made, so no song list can be
     looked up for it. Trying again won't help."""
+
+
+class AlreadyDownloading(ToolError):
+    """Another program (the app, the Sunday task) is downloading this show right now.
+    Not a fault: it will be there when that one finishes."""
 
 
 def _session():
@@ -389,7 +414,7 @@ def http_download(url, dest: Path, attempts=3):
         except (OSError, ValueError):
             age, holder = 0, 0
         if age < 3 * 3600 and (holder == 0 or _process_alive(holder)):
-            raise ToolError(f"{dest.name} is already being downloaded by another window or the Sunday task")
+            raise AlreadyDownloading(f"{dest.name} is already being downloaded by another window or the Sunday task")
         lock.write_text(str(os.getpid()), encoding="utf-8")   # left by a download that was cut off
     _HELD_LOCKS.add(lock)
     try:
@@ -1844,9 +1869,12 @@ def remember_title(show, dest: Path):
     p = show_info_path(dest)
     info = {"title": show["title"], "date": show["date"], "time_label": show["time_label"]}
     try:
-        if p.exists() and json.loads(p.read_text(encoding="utf-8")) == info:
+        old = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        old = old if isinstance(old, dict) else {}
+        if all(old.get(k) == v for k, v in info.items()):
             return
-        p.write_text(json.dumps(info, indent=1, ensure_ascii=False), encoding="utf-8")
+        # (keeping anything else noted there, such as the festival act a slot continues)
+        p.write_text(json.dumps(dict(old, **info), indent=1, ensure_ascii=False), encoding="utf-8")
     except (OSError, ValueError):
         pass
 
@@ -1927,13 +1955,18 @@ def festival_files(fest, dest_dir=None):
     spills into a slot the archive titles only by its regular show (Samantha Fish
     ran on into 'Soul Power with Soul Sister' on 2026-10-10)."""
     dest_dir = Path(dest_dir) if dest_dir else download_dir_from_config(load_config())
-    days = [(_clock(day, min(s["start"] for s in rows)), _clock(day, max(s["end"] for s in rows)))
-            for day, rows in fest.get("days", {}).items() if rows]
+    days = _set_hours(fest)
 
     def during(p):
         st = start_time_from_name(p)
         return bool(st) and any(a <= st < b for a, b in days)
     return sorted(p for p in dest_dir.glob("*.mp3") if festival_for(p, [fest]) or during(p))
+
+
+def _set_hours(fest):
+    """[(first set's start, last set's end)] for each day of a festival's schedule."""
+    return [(_clock(day, min(s["start"] for s in rows)), _clock(day, max(s["end"] for s in rows)))
+            for day, rows in fest.get("days", {}).items() if rows]
 
 
 def festival_folder(fest):
@@ -2225,6 +2258,163 @@ def cmd_festival(args):
             cut_festival(f, dest_dir)
 
 
+# ---------------------------------------------- festivals, on their own ---
+# The archive keeps a festival broadcast for two weeks only, so the Sunday task and the
+# open app download the festivals WWOZ carries live without being asked: every slot the
+# archive titles "Live from <a festival>: ...", the slot after one whose last act runs
+# on, and, for a festival with set times (a fest-*.json), any slot that starts while a
+# set is on. Only from the day the feature began on this computer ('auto_festivals_from'
+# in the settings), so the festivals already in the archive then are left alone; and
+# each broadcast once only (festival_downloads.json), so deleting the downloads after
+# their sets are cut doesn't bring them back. A festival with set times is cut into sets
+# as before; without them its broadcasts stay whole, and the app's library lists them
+# under the festival, by day, named for their acts (broadcast_info).
+
+FESTIVAL_RECORD = DATA_DIR / "festival_downloads.json"
+
+
+def auto_festivals_on(cfg):
+    return cfg.get("auto_festivals", True) is not False
+
+
+def auto_festivals_from(cfg):
+    """The first day (Central) whose festival broadcasts are downloaded on their own."""
+    try:
+        return datetime.strptime(str(cfg.get("auto_festivals_from")), "%Y-%m-%d").date()
+    except ValueError:
+        return datetime.now(TZ).date()            # unreadable: nothing from before today
+
+
+def set_auto_festivals(on):
+    """Turn the automatic festival downloads on or off (the box on the Weekly Favorites
+    page). Turned back on, they start again from that day, so still nothing older."""
+    cfg = load_config()
+    if on and not auto_festivals_on(cfg):
+        cfg["auto_festivals_from"] = f"{datetime.now(TZ):%Y-%m-%d}"
+    cfg["auto_festivals"] = bool(on)
+    save_config(cfg)
+    return cfg
+
+
+def festival_named(title, fests=None):
+    """The festival an archive title says aired in its slot ('Crescent City Blues and BBQ
+    Fest'), or None. A 'Live from' slot counts when the place is a festival (its name says
+    Fest or Festival) or a fest-*.json names it; WWOZ's one-off concerts from a club or a
+    theater ('Live from the Maple Leaf: ...') don't."""
+    place = broadcast_parts(title)["festival"]
+    if not place:
+        return None
+    if "fest" in place.lower():
+        return place
+    t = loose(title)
+    fests = load_broadcast_festivals() if fests is None else fests
+    if any(loose(f.get("title_match")) and loose(f["title_match"]) in t for f in fests):
+        return place
+    return None
+
+
+_PART_AT_END = re.compile(r"([^,]+?)\s*\(pt\.?\s*\d+\)\s*$", re.I)
+
+
+def _runs_on(title):
+    """The act a festival slot ends with when it carries on into the next slot: 'Samantha
+    Fish' for '...: Cedric Burnside (pt 2), Samantha Fish (pt 1)'. The archive titled
+    the slot after that one only by its regular show, though she played on into it."""
+    parts = broadcast_parts(title)
+    if not parts["order"] or parts["order"][-1] is not None:
+        return None                    # a regular show follows the festival in this slot
+    m = _PART_AT_END.search(parts["acts"] or "")
+    return m.group(1).strip() if m else None
+
+
+def festival_downloads_record():
+    """{file name: day downloaded} for the festival broadcasts downloaded on their own."""
+    try:
+        rec = json.loads(FESTIVAL_RECORD.read_text(encoding="utf-8")).get("downloaded", {})
+        return rec if isinstance(rec, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def remember_festival_download(show):
+    rec = festival_downloads_record()
+    rec[show["filename"]] = f"{datetime.now(TZ):%Y-%m-%d}"
+    gone = datetime.now(TZ) - timedelta(days=60)          # long out of the archive by then
+    rec = {k: v for k, v in rec.items() if not (st := start_time_from_name(Path(k))) or st > gone}
+    write_text_atomic(FESTIVAL_RECORD, json.dumps(
+        {"_help": "Festival broadcasts WWOZ Studio downloaded on its own, so each is downloaded "
+                  "once only, even if you delete it afterwards.", "downloaded": rec}, indent=1))
+
+
+def festival_picks(shows, cfg, dest_dir):
+    """The archive shows (from fetch_archive_shows) to download because a festival aired
+    in them, oldest first: none when the setting is off, none broadcast before its first
+    day, none downloaded already or once before. Each carries '_festival' (its name); a
+    slot that only continues an act carries '_continues' too ({'festival', 'act'})."""
+    if not auto_festivals_on(cfg):
+        return []
+    first = auto_festivals_from(cfg)
+    fests = load_broadcast_festivals()
+    timed = sorted((s for s in shows if s.get("start")), key=lambda s: s["start"])
+    picks = {}
+    for i, s in enumerate(timed):
+        if s["start"].date() < first:
+            continue
+        place = festival_named(s["title"], fests)
+        if place:
+            picks.setdefault(s["filename"], dict(s, _festival=place))
+            act, nxt = _runs_on(s["title"]), (timed[i + 1] if i + 1 < len(timed) else None)
+            if (act and nxt and nxt["start"] - s["start"] < timedelta(hours=4)
+                    and not festival_named(nxt["title"], fests)):
+                picks.setdefault(nxt["filename"],
+                                 dict(nxt, _festival=place, _continues={"festival": place, "act": act}))
+            continue
+        for f in fests:                # a set that ran on into a slot titled by its regular show
+            if any(a <= s["start"] < b for a, b in _set_hours(f)):
+                picks.setdefault(s["filename"], dict(s, _festival=f.get("short") or f["name"]))
+    done = festival_downloads_record()
+    return [s for s in picks.values()
+            if s["filename"] not in done and not (Path(dest_dir) / s["filename"]).exists()]
+
+
+def download_festival_show(show, dest_dir):
+    """Download one of festival_picks' shows, noting it so it is downloaded once only."""
+    dest = download_show(show, dest_dir)
+    if show.get("_continues"):
+        p = show_info_path(dest)
+        try:
+            info = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+            info["continues"] = show["_continues"]
+            p.write_text(json.dumps(info, indent=1, ensure_ascii=False), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+    remember_festival_download(show)
+    return dest
+
+
+def broadcast_info(path, fests=None):
+    """For a download a festival aired in: (the festival, what aired in the slot, the acts
+    first since the library has room for little more), such as ('Crescent City Blues and
+    BBQ Fest', 'Johnny Sansone, after Jazz from Jax Brewery with Charles Burchell'); else
+    None."""
+    try:
+        info = json.loads(show_info_path(path).read_text(encoding="utf-8"))
+        title = info.get("title") or ""
+    except (OSError, ValueError, AttributeError):
+        return None
+    place = festival_named(title, fests)
+    if place:
+        parts = broadcast_parts(title)
+        k = parts["order"].index(None)
+        what = (parts["acts"] + "".join(f", after {x}" for x in parts["order"][:k])
+                + "".join(f", then {x}" for x in parts["order"][k + 1:]))
+        return place, what.replace(" (pt ", " (part ")
+    cont = info.get("continues")
+    if isinstance(cont, dict) and cont.get("festival") and cont.get("act"):
+        return cont["festival"], f"{cont['act']} (continued), then {title}"
+    return None
+
+
 # ---------------------------------------------------------------- record ---
 
 STREAM_URL = "https://wwoz-sc.streamguys1.com/wwoz-hi.mp3"
@@ -2310,7 +2500,7 @@ def cmd_weekly(args):
     cfg = load_config()
     dest_dir = download_dir_from_config(cfg)
     favs = [f for f in cfg.get("favorites", []) if f.get("enabled")]
-    if not favs:
+    if not favs and not auto_festivals_on(cfg):
         out("No favorites enabled yet. Check some shows in WWOZ Studio's Weekly Favorites tab")
         out("(or set \"enabled\": true in favorites.json), then re-run.")
         return
@@ -2319,17 +2509,36 @@ def cmd_weekly(args):
     new = [s for s in shows
            if any(favorite_matches(f, s) for f in favs)
            and not (dest_dir / s["filename"]).exists()]
-    wanted = [f.get("match") or f"{f['day']} {f['start']}" for f in favs]
-    out(f"{len(new)} new episode(s) matching favorites ({', '.join(wanted)}) -> {dest_dir}:")
+    if favs:
+        wanted = [f.get("match") or f"{f['day']} {f['start']}" for f in favs]
+        out(f"{len(new)} new episode(s) matching favorites ({', '.join(wanted)}) -> {dest_dir}:")
+    else:
+        out("No favorite shows checked yet (WWOZ Studio's Weekly Favorites page).")
     fests = {}
-    for s in new:
+
+    def get(s, festival=False):
         try:
-            f = festival_for(download_show(s, dest_dir))
+            f = festival_for(download_festival_show(s, dest_dir) if festival else download_show(s, dest_dir))
             if f:
                 fests[f["name"]] = f
+        except AlreadyDownloading as e:   # the app is getting it at this moment
+            out(f"    skipped: {e}")
         except Exception as e:
             out(f"    FAILED: {e}")
             report_error("Sunday download")
+    for s in new:
+        get(s)
+    if auto_festivals_on(cfg):
+        taken = {s["filename"] for s in new}
+        live = [s for s in festival_picks(shows, cfg, dest_dir) if s["filename"] not in taken]
+        first = auto_festivals_from(cfg)
+        names = sorted({s["_festival"] for s in live})
+        out(f"{len(live)} new festival broadcast(s) from {first:%B} {first.day} on"
+            + (f" ({', '.join(names)})" if names else "") + (":" if live else "."))
+        for s in live:
+            get(s, festival=True)
+    else:
+        out("Festival broadcasts aren't downloaded on their own (turned off on the Weekly Favorites page).")
     for f in fests.values():                    # a festival broadcast among them: recut its sets
         try:
             cut_festival(f, dest_dir)
@@ -2345,7 +2554,7 @@ def cmd_weekly(args):
                 fetch_tracklist_or_mark(p)       # keeps any Shazam finds already merged
             else:
                 m.unlink(missing_ok=True)
-    todo = pending_downloads(dest_dir)          # the new ones, plus anything missed before
+    todo = [] if args.no_shazam else pending_downloads(dest_dir)   # the new ones, and any missed before
     if todo:
         out(f"Shazam-scanning {len(todo)} download(s) for songs the DJ didn't log:")
         for p in todo:
@@ -2422,7 +2631,9 @@ def main():
                    help="start each track this many seconds before its logged time (default 15)")
     s.set_defaults(fn=cmd_split)
 
-    sub.add_parser("weekly", help="download new episodes of favorites").set_defaults(fn=cmd_weekly)
+    wk = sub.add_parser("weekly", help="download new episodes of favorites, and new festival broadcasts")
+    wk.add_argument("--no-shazam", action="store_true", help="skip the fingerprint scan after downloading")
+    wk.set_defaults(fn=cmd_weekly)
 
     ac = sub.add_parser("autocut", help="auto-detect performance boundaries (VAD + Whisper)")
     ac.add_argument("file")

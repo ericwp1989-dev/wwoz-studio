@@ -383,6 +383,7 @@ class App(tk.Tk):
         self._fest_casts = {}       # festival broadcast download -> festival
         self._fest_progs = {}       # WWOZ show cut from a festival broadcast -> (festival, entry)
         self._fests = []
+        self._auto_casts = {}       # festival broadcast with no set times -> its library entry
         self._items = {}            # every playable file -> what it is (see _catalog)
         self._seen_groups = set()
         self._loaded_keys = set()   # tracklist rows on disk when the open file was loaded
@@ -398,6 +399,8 @@ class App(tk.Tk):
         self.scan_now = None
         self.scan_resume_at = 0        # when Shazam goes quiet, scans wait until then
         self._other_scanner = False    # the Sunday task's scan lock was seen
+        self._fest_queue = []          # festival broadcasts to download (wwoz.festival_picks)
+        self._fest_checked = time.time() - 3600 + 60   # the archive is first looked at a minute in
 
         self._build_ui()
         self._init_player()
@@ -834,6 +837,8 @@ class App(tk.Tk):
                        if it.get("fest_full") else ""}[it["source"]]
             elif it["kind"] == "between":
                 src = (it.get("fest") or "your recording") + ", between sets"
+            elif it["kind"] == "broadcast":
+                src = f"{it['fest']}, whole broadcast"
             else:
                 src = f"{it['fest_full'].get('short')}, full broadcast"
             name = it["name"] if it["kind"] != "full" else self._full_title(p, it)
@@ -1083,7 +1088,8 @@ class App(tk.Tk):
         ttk.Button(top, text="Recordings folder...", command=self.choose_recordings_dir).pack(side="left", padx=6)
         ttk.Label(t, text="Everything WWOZ keeps on demand (two weeks). Select one or more shows "
                           f"({MOD_NAME} or Shift to pick several) and click Download; a check mark means you "
-                          "have it. Festival broadcasts are cut into sets automatically.",
+                          "have it. Festival broadcasts are in purple; new ones download on their own "
+                          "(see Weekly Favorites).",
                   style="Hint.TLabel").pack(anchor="w", padx=10, pady=(0, 4))
 
         cols = ("date", "time", "title")
@@ -1107,7 +1113,16 @@ class App(tk.Tk):
                           f"Sunday at 9 AM {'your Mac' if MAC else 'Windows'} downloads their new episodes. "
                           "Click a show's name to read "
                           "about it and what it plays. \"Download an episode\" grabs one right now.",
-                  style="Hint.TLabel", justify="left", wraplength=px(1120)).pack(anchor="w", padx=10, pady=(0, 8))
+                  style="Hint.TLabel", justify="left", wraplength=px(1120)).pack(anchor="w", padx=10, pady=(0, 4))
+        # the festivals WWOZ carries live, downloaded with no favorite needed (wwoz.festival_picks)
+        ff = ttk.Frame(t)
+        ff.pack(fill="x", padx=10, pady=(0, 8))
+        self.fest_var = tk.BooleanVar(value=wwoz.auto_festivals_on(wwoz.load_config()))
+        ttk.Checkbutton(ff, text="Also download the festivals WWOZ broadcasts live, on their own",
+                        variable=self.fest_var, command=self._fest_toggled).pack(side="left")
+        self.fest_hint = ttk.Label(ff, text="", style="Hint.TLabel")
+        self.fest_hint.pack(side="left", padx=(12, 0))
+        self._show_fest_hint()
         bf = ttk.Frame(t)
         bf.pack(fill="x", padx=10, pady=(0, 4))
         ttk.Button(bf, text="Save favorites", command=self.save_favorites).pack(side="left")
@@ -1203,7 +1218,8 @@ class App(tk.Tk):
         shows listed in each festival folder's festival.json, and the broadcast downloads."""
         self._fest_sets, self._fest_casts, self._fest_progs = {}, {}, {}
         self._fests = []
-        for fest in wwoz.load_broadcast_festivals():
+        fests = wwoz.load_broadcast_festivals()
+        for fest in fests:
             folder = wwoz.festival_folder(fest)
             try:
                 idx = json.loads((folder / "festival.json").read_text(encoding="utf-8"))
@@ -1221,6 +1237,28 @@ class App(tk.Tk):
             if sets or casts:
                 self._fests.append((fest, folder, sets, casts))
         self._fests.sort(key=lambda f: min(f[0]["days"]), reverse=True)    # newest festival first
+
+        # a festival with no set times (no fest-*.json): its broadcasts stay whole, listed
+        # under the festival by day and named for their acts
+        self._auto_casts, self._auto_fests = {}, []
+        if not arch.exists():
+            return
+        cut = {p for fest, *_ in self._fests for p in wwoz.festival_files(fest, arch)}
+        names = {}
+        for p in sorted(arch.glob("*.mp3")):
+            st = wwoz.start_time_from_name(p)
+            info = None if p in cut or not st else wwoz.broadcast_info(p, fests)
+            if info:
+                gid = f"::af:{wwoz.loose(info[0])}:{st.year}"
+                names.setdefault(gid, []).append(info[0])
+                self._auto_casts[p] = {"section": gid, "place": info[0], "name": info[1], "clock": st}
+        for gid, seen in names.items():
+            place, year = max(set(seen), key=seen.count), gid.rsplit(":", 1)[1]
+            title = place if year in place else f"{place} {year}"
+            mine = [e for e in self._auto_casts.values() if e["section"] == gid]
+            for e in mine:
+                e["fest"] = title
+            self._auto_fests.append((gid, title, min(f"{e['clock']:%Y-%m-%d}" for e in mine)))
 
     @staticmethod
     def _clock(dt, minutes=True):
@@ -1278,11 +1316,15 @@ class App(tk.Tk):
         for p, (fest, pr) in self._fest_progs.items():
             items[p] = {"kind": "episode", "section": "::shows", "source": "festival", "fest_full": fest,
                         "name": pr["name"], "clock": datetime.fromisoformat(pr["clock"])}
+        for p, e in self._auto_casts.items():              # festivals with no set times
+            items[p] = dict(e, kind="broadcast", day=f"{e['clock']:%Y-%m-%d}")
 
         # archive downloads: festival broadcasts are full recordings, the rest episodes
         if arch.exists():
             for p in sorted(arch.glob("*.mp3")):
                 start = wwoz.start_time_from_name(p)
+                if p in self._auto_casts:
+                    continue
                 if p in self._fest_casts:
                     items[p] = {"kind": "full", "section": "::full", "sub": f"{self._fest_casts[p].get('short')} broadcasts",
                                 "name": p.stem, "clock": start, "fest_full": self._fest_casts[p]}
@@ -1349,6 +1391,12 @@ class App(tk.Tk):
                               + (f" at {fest['place']}" if fest.get("place") else "")
                               + ". Cut at the scheduled set change, so it can open with the end of the "
                                 "previous act, a record, or the DJ's introduction.")}
+        if it["kind"] == "broadcast":                               # a festival with no set times
+            return {"title": it["name"],
+                    "subtitle": f"{when:%A, %B} {when.day}, {when.year}, WWOZ's broadcast from {clock(when)}",
+                    "about": (f"WWOZ's live broadcast from the {it['place']}, whole, as the archive keeps "
+                              "it. WWOZ Studio has no set times for this festival, so it isn't cut into "
+                              "sets; the song list shows any records the DJs logged.")}
         if it["kind"] == "set":                                     # Jazz Fest, from your recording
             how = self._how_named(it["label"])
             return {"title": it["name"],
@@ -1427,7 +1475,7 @@ class App(tk.Tk):
     def _leaf(self, p, it):
         """The library line for a file: (text, when column)."""
         c = it.get("clock")
-        if it["kind"] == "set":
+        if it["kind"] in ("set", "broadcast"):
             return it["name"], self._clock(c) if c else ""
         if it["kind"] == "episode":
             text = f"{c:%a %b} {c.day}" if c else it["name"]
@@ -1470,27 +1518,34 @@ class App(tk.Tk):
                         tags=tags + (("playing",) if self.current_file == p else ()))
             self.lib_paths[str(p)] = p
 
-        def festival(gid, title, sets, default_open):
+        def festival(gid, title, sets, default_open, noun="set"):
             sets = [(p, it) for p, it in sets if hit(p, it)]
             if not sets:
                 return
-            node("", gid, f"{title.upper()}  ({len(sets)} sets)", tags=("group",), default_open=True)
+            count = f"{len(sets)} {noun}{'s' if len(sets) != 1 else ''}"
+            if noun == "set":
+                node("", gid, f"{title.upper()}  ({count})", tags=("group",), default_open=True)
+            else:                   # festival names in titles run long: the count goes at the right
+                node("", gid, title.upper(), count, tags=("group",), default_open=True)
             for day in sorted({it["day"] for _, it in sets}):
                 d = datetime.strptime(day, "%Y-%m-%d")
                 todays = sorted((x for x in sets if x[1]["day"] == day), key=lambda x: x[1]["clock"])
                 node(gid, f"{gid}:{day}", f"{d:%A, %B} {d.day}",
-                     f"{len(todays)} set" + ("s" if len(todays) != 1 else ""), ("day",), default_open)
+                     f"{len(todays)} {noun}" + ("s" if len(todays) != 1 else ""), ("day",), default_open)
                 for p, it in todays:
                     leaf(f"{gid}:{day}", p, it, ("set",))
 
-        # festivals: Jazz Fest first (your own recordings), then the broadcast ones, newest first
+        # festivals: Jazz Fest first (your own recordings), then the broadcast ones, newest
+        # first: those cut into sets, and those with no set times, whole broadcasts by day
         jf = [(p, it) for p, it in items.items() if it["section"] == "::fest"]
         if jf:
             festival("::fest", jf[0][1]["fest"], jf, default_open=False)
-        for fest, *_ in self._fests:
-            gid = f"::bf:{fest['name']}"
-            festival(gid, fest.get("short") or fest["name"],
-                     [(p, it) for p, it in items.items() if it["section"] == gid], default_open=True)
+        aired = [(min(fest["days"]), f"::bf:{fest['name']}", fest.get("short") or fest["name"], "set")
+                 for fest, *_ in self._fests]
+        aired += [(first, gid, title, "broadcast") for gid, title, first in self._auto_fests]
+        for _, gid, title, noun in sorted(aired, reverse=True):
+            festival(gid, title, [(p, it) for p, it in items.items() if it["section"] == gid],
+                     default_open=True, noun=noun)
 
         # the WWOZ shows, by show
         eps = [(p, it) for p, it in items.items() if it["section"] == "::shows" and hit(p, it)]
@@ -1890,10 +1945,11 @@ class App(tk.Tk):
         def done():
             self.arch.delete(*self.arch.get_children())
             dest = archive_dir()
+            fests = wwoz.load_broadcast_festivals()
             for i, s in enumerate(self.archive_shows):
                 have = (dest / s["filename"]).exists()
                 d = datetime.strptime(s["date"], "%Y-%m-%d")
-                live = "Live from" in s["title"] or "Live at" in s["title"]
+                live = bool(wwoz.festival_named(s["title"], fests))
                 self.arch.insert("", "end", iid=str(i),
                                  values=(f"{d:%a %b} {d.day}", s["time_label"].lower(),
                                          s["title"] + ("   ✓" if have else "")),
@@ -2011,6 +2067,28 @@ class App(tk.Tk):
         lbl.bind("<Button-1>", lambda e, en=entry: self._fav_select(en))
         self.fav_rows.append(entry)
         return entry
+
+    def _fest_toggled(self):
+        on = self.fest_var.get()
+        cfg = wwoz.set_auto_festivals(on)
+        self._show_fest_hint(cfg)
+        if on:
+            self._fest_checked = 0                    # look at the archive at the next quiet moment
+            first = wwoz.auto_festivals_from(cfg)
+            self.logln(f"festival broadcasts will download on their own, from {first:%B} {first.day} on")
+        else:
+            self._fest_queue = []
+            self.logln("festival broadcasts no longer download on their own")
+
+    def _show_fest_hint(self, cfg=None):
+        cfg = cfg or wwoz.load_config()
+        if wwoz.auto_festivals_on(cfg):
+            first = wwoz.auto_festivals_from(cfg)
+            text = (f"Every broadcast from {first:%B} {first.day} on, kept for good. A three-day "
+                    "festival is about 2 GB, and as much again once it's cut into sets.")
+        else:
+            text = "Off: a festival broadcast downloads only if you pick it on the WWOZ Archive page."
+        self.fest_hint.configure(text=text)
 
     def _fav_toggled(self, entry):
         """A checked box is a pick: select the row and save right away, so "Run weekly
@@ -2185,20 +2263,25 @@ class App(tk.Tk):
         favs = [f for f in cfg.get("favorites", []) if f.get("enabled")]
 
         def work():
-            if not favs:
+            if not favs and not wwoz.auto_festivals_on(cfg):
                 self.logln("No favorites checked yet.")
                 return
             shows = wwoz.fetch_archive_shows()
+            wwoz.remember_titles(shows, dest)
             new = [s for s in shows if any(wwoz.favorite_matches(f, s) for f in favs)
                    and not (dest / s["filename"]).exists()]
-            self.logln(f"{len(new)} new episode(s) of your favorites to download")
+            taken = {s["filename"] for s in new}
+            live = [s for s in wwoz.festival_picks(shows, cfg, dest) if s["filename"] not in taken]
+            self.logln(f"{len(new)} new episode(s) of your favorites to download"
+                       + (f", and {len(live)} festival broadcast(s)" if live else ""))
             got = []
-            for s in new:
+            for s in new + live:
                 try:
-                    got.append(wwoz.download_show(s, dest))
+                    got.append(wwoz.download_festival_show(s, dest) if "_festival" in s else wwoz.download_show(s, dest))
                 except Exception as e:
                     self.logln(f"    FAILED: {e}")
                     log_error()
+            self._fest_queue = [s for s in self._fest_queue if not (dest / s["filename"]).exists()]
             self._cut_new_festivals(got)
         self._bg(work, done=lambda: (self.refresh_library(), self.refresh_shows(), self.load_favorites()))
 
@@ -2209,8 +2292,10 @@ class App(tk.Tk):
     #   3. a recording whose list changed is cut again into sets and shows, two minutes
     #      after the last change, so a few quick fixes by hand make one cut;
     #   4. a download whose song list could not be fetched is tried again;
-    #   5. a broadcast festival is cut again when its downloads change;
-    #   6. downloads get their Shazam scan, only while nothing is playing.
+    #   5. the festivals WWOZ broadcasts live are downloaded (the archive is looked at
+    #      once an hour; see wwoz.festival_picks), unless that is turned off;
+    #   6. a broadcast festival is cut again when its downloads change;
+    #   7. downloads get their Shazam scan, only while nothing is playing.
 
     def _is_fest_day(self, p):
         """Does a recording cover at least 20 minutes of a Jazz Fest broadcast day? Only
@@ -2273,6 +2358,17 @@ class App(tk.Tk):
             if due(key):
                 return (f"trying the song list again for {self._describe(p)['title']}",
                         lambda p=p: wwoz.fetch_tracklist_or_mark(p), key)
+        if wwoz.auto_festivals_on(wwoz.load_config()):
+            for s in list(self._fest_queue):
+                key = (s["filename"], "festival-download")
+                if due(key):
+                    d = datetime.strptime(s["date"], "%Y-%m-%d")
+                    return (f"downloading WWOZ's broadcast from the {s['_festival']} "
+                            f"({d:%a %b} {d.day}, {s['time_label'].lower()})",
+                            lambda s=s, key=key: self._download_festival(s, key), key)
+            if now - self._fest_checked >= 3600:
+                return ("looking in WWOZ's archive for festival broadcasts", self._check_festivals,
+                        ("archive", "festival-check", now))
         for fest, folder, sets, casts in self._fests:
             idx = folder / "festival.json"
             files = wwoz.festival_files(fest, arch)
@@ -2313,7 +2409,8 @@ class App(tk.Tk):
             idle = 0
             label, fn, key = job
             self.job_text = label
-            self.logln(f"on its own: {label}")
+            if key[1] != "festival-check":            # hourly, so it speaks only when it finds some
+                self.logln(f"on its own: {label}")
             try:
                 fn()
             except wwoz.ShazamQuiet:
@@ -2356,6 +2453,35 @@ class App(tk.Tk):
                 self.logln(line.rstrip())
         if proc.wait():
             raise RuntimeError(f"set detection stopped early (code {proc.returncode})")
+
+    def _check_festivals(self):
+        """Look in WWOZ's archive for festival broadcasts to download (once an hour)."""
+        self._fest_checked = time.time()
+        arch = archive_dir()
+        try:
+            shows = wwoz.fetch_archive_shows()
+        except wwoz.requests.RequestException:        # offline: not a fault worth a report
+            self.logln("couldn't reach WWOZ's archive to look for festival broadcasts; "
+                       "it looks again in an hour")
+            return
+        wwoz.remember_titles(shows, arch)
+        picks = wwoz.festival_picks(shows, wwoz.load_config(), arch)
+        if picks:
+            names = sorted({s["_festival"] for s in picks})
+            self.logln(f"{len(picks)} festival broadcast(s) in WWOZ's archive to download "
+                       f"({', '.join(names)})")
+        self._fest_queue = picks
+
+    def _download_festival(self, s, key):
+        """Download one festival broadcast. With no connection, or while the Sunday task
+        is getting the same show, it is tried again an hour later."""
+        try:
+            wwoz.download_festival_show(s, archive_dir())
+        except (wwoz.AlreadyDownloading, wwoz.requests.RequestException) as e:
+            self._job_tried[key] = time.time()
+            self.logln(f"    not downloaded now ({e}); it's tried again in an hour")
+            return
+        self._fest_queue = [q for q in self._fest_queue if q["filename"] != s["filename"]]
 
     def _shazam(self, p):
         self.scan_now = p
