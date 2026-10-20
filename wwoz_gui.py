@@ -1115,13 +1115,11 @@ class App(tk.Tk):
                           "about it and what it plays. \"Download an episode\" grabs one right now.",
                   style="Hint.TLabel", justify="left", wraplength=px(1120)).pack(anchor="w", padx=10, pady=(0, 4))
         # the festivals WWOZ carries live, downloaded with no favorite needed (wwoz.festival_picks)
-        ff = ttk.Frame(t)
-        ff.pack(fill="x", padx=10, pady=(0, 8))
         self.fest_var = tk.BooleanVar(value=wwoz.auto_festivals_on(wwoz.load_config()))
-        ttk.Checkbutton(ff, text="Also download the festivals WWOZ broadcasts live, on their own",
-                        variable=self.fest_var, command=self._fest_toggled).pack(side="left")
-        self.fest_hint = ttk.Label(ff, text="", style="Hint.TLabel")
-        self.fest_hint.pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(t, text="Also download the festivals WWOZ broadcasts live, on their own",
+                        variable=self.fest_var, command=self._fest_toggled).pack(anchor="w", padx=10)
+        self.fest_hint = ttk.Label(t, text="", style="Hint.TLabel", justify="left", wraplength=px(1120))
+        self.fest_hint.pack(anchor="w", padx=(32, 10), pady=(0, 8))
         self._show_fest_hint()
         bf = ttk.Frame(t)
         bf.pack(fill="x", padx=10, pady=(0, 4))
@@ -1522,16 +1520,16 @@ class App(tk.Tk):
             sets = [(p, it) for p, it in sets if hit(p, it)]
             if not sets:
                 return
-            count = f"{len(sets)} {noun}{'s' if len(sets) != 1 else ''}"
             if noun == "set":
-                node("", gid, f"{title.upper()}  ({count})", tags=("group",), default_open=True)
-            else:                   # festival names in titles run long: the count goes at the right
-                node("", gid, title.upper(), count, tags=("group",), default_open=True)
+                node("", gid, f"{title.upper()}  ({len(sets)} sets)", tags=("group",), default_open=True)
+            else:       # whole broadcasts: the festival's name runs long, so just the count, at the right
+                node("", gid, title.upper(), str(len(sets)), tags=("group",), default_open=True)
             for day in sorted({it["day"] for _, it in sets}):
                 d = datetime.strptime(day, "%Y-%m-%d")
                 todays = sorted((x for x in sets if x[1]["day"] == day), key=lambda x: x[1]["clock"])
                 node(gid, f"{gid}:{day}", f"{d:%A, %B} {d.day}",
-                     f"{len(todays)} {noun}" + ("s" if len(todays) != 1 else ""), ("day",), default_open)
+                     (f"{len(todays)} set" + ("s" if len(todays) != 1 else "")) if noun == "set"
+                     else str(len(todays)), ("day",), default_open)
                 for p, it in todays:
                     leaf(f"{gid}:{day}", p, it, ("set",))
 
