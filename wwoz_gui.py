@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -26,10 +27,62 @@ if getattr(sys, "frozen", False):
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent
 
-import wwoz  # the CLI module, reused as a library
-import wwoz_player  # the sound: ffmpeg and miniaudio in a helper process
-
 APP = "WWOZ Studio"
+
+try:
+    import wwoz_report  # error reports to the program's maker (Python's own modules only)
+except Exception:
+    wwoz_report = None
+
+
+def report_exception(kind, exc_info=None, wait=False):
+    """Send the error being handled (or exc_info) as a report; never raises."""
+    if wwoz_report:
+        try:
+            wwoz_report.send_exception(kind, exc_info, wait=wait)
+        except Exception:
+            pass
+
+
+def cannot_start(exc, log=None):
+    """Say in a box why the app can't open. It runs without a console, so an error while
+    starting would otherwise close it with no word at all: the desktop icon would just
+    seem to do nothing."""
+    import traceback
+    setup = "Setup (Mac).command" if sys.platform == "darwin" else "Setup.cmd"
+    if isinstance(exc, ModuleNotFoundError):
+        why = (f"A part it needs (the Python package \"{exc.name}\") isn't installed. "
+               f"Double-click {setup} in the program's folder, then open WWOZ Studio again.")
+    else:
+        why = (f"{exc}\n\nDouble-click {setup} in the program's folder and try again. If that "
+               f"doesn't help, the details are in the error log.")
+    report_exception("the app couldn't open", wait=True)
+    log = log or (Path(os.environ.get("WWOZ_DATA") or Path.home() / "Documents" / "WWOZ Studio")
+                  / "wwoz_studio_errors.log")
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.now():%Y-%m-%d %I:%M:%S %p}\n{traceback.format_exc()}")
+        why += f"\n\nError log: {log}"
+    except OSError:
+        pass
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP, f"WWOZ Studio couldn't open.\n\n{why}", parent=root)
+        root.destroy()
+    except tk.TclError:
+        pass
+    sys.exit(1)
+
+
+try:
+    import wwoz_player  # the sound: ffmpeg and miniaudio in a helper process
+    wwoz_player.see_personal_packages()   # packages a pip --user install put out of Python's sight
+    import wwoz  # the CLI module, reused as a library
+except Exception as _e:
+    cannot_start(_e)
+
 RECORDINGS_DIR = wwoz.RECORDINGS_DIR
 STATE_PATH = wwoz.DATA_DIR / "player_state.json"   # where you stopped in each show
 AUDIO_EXT = {".mp3", ".mkv", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".mp4"}
@@ -58,6 +111,7 @@ def log_error():
             f.write(f"\n===== {datetime.now():%Y-%m-%d %I:%M:%S %p}\n{traceback.format_exc()}")
     except OSError:
         pass
+    report_exception("app error")
 
 
 def log_line(text):
@@ -68,6 +122,8 @@ def log_line(text):
             f.write(f"\n===== {datetime.now():%Y-%m-%d %I:%M:%S %p}\n{text}\n")
     except OSError:
         pass
+    if wwoz_report and text.startswith("playback problem"):
+        wwoz_report.send("playback", text)
 
 
 def log_error_from(exc_info):
@@ -79,6 +135,7 @@ def log_error_from(exc_info):
                     + "".join(traceback.format_exception(*exc_info)))
     except OSError:
         pass
+    report_exception("app error", exc_info)
 
 
 def load_state():
@@ -90,7 +147,7 @@ def load_state():
 
 def save_state(st):
     try:
-        STATE_PATH.write_text(json.dumps(st, indent=1), encoding="utf-8")
+        wwoz.write_text_atomic(STATE_PATH, json.dumps(st, indent=1))
     except Exception:
         pass
 
@@ -154,6 +211,43 @@ else:
     FONT_SIGN_LT = ("Copperplate Gothic Light", 9)
     FONT_MAST, FONT_FLEUR, FONT_AIR = ("Bodoni MT Black", 21), ("Segoe UI Symbol", 28), ("Georgia", 11)
 MOD, MOD_NAME = ("Command", "Command") if MAC else ("Control", "Ctrl")   # page keys, picking several
+
+# Windows display scaling (125% or 150% on most laptops). The app tells Windows it draws
+# at the screen's real size, so its text stays sharp instead of being stretched like a
+# picture; fonts then grow on their own, and the sizes given in pixels grow by UI.
+UI = 1.0
+
+
+def px(n):
+    return int(round(n * UI))
+
+
+def set_ui_scale(root):
+    """How much larger than 100% the screen is set (1.0 on a Mac, whose Tk does this
+    itself). WWOZ_UI_SCALE tries another size on this screen (1.5 looks like 150%)."""
+    global UI
+    forced = os.environ.get("WWOZ_UI_SCALE")
+    if forced:
+        UI = float(forced)
+        root.tk.call("tk", "scaling", UI * 96 / 72)
+    elif not MAC:
+        UI = max(1.0, root.winfo_fpixels("1i") / 96)
+
+
+def pick_fonts(root):
+    """The masthead and headings are set in Bodoni MT Black and Copperplate Gothic, which
+    come with Microsoft Office, not Windows. Where they're missing Tk quietly uses plain
+    Arial, so take the nearest faces every Windows computer has instead."""
+    global FONT_SIGN, FONT_SIGN_LT, FONT_MAST
+    if MAC:
+        return                                       # the Mac's own fonts are always there
+    have = set(tkfont.families(root))
+    if "Copperplate Gothic Bold" not in have:
+        FONT_SIGN = ("Segoe UI Semibold", 9)
+    if "Copperplate Gothic Light" not in have:
+        FONT_SIGN_LT = ("Segoe UI", 9)
+    if "Bodoni MT Black" not in have:
+        FONT_MAST = ("Georgia", 21, "bold")
 NAV = [("Player", "tab_player"), ("Shows", "tab_shows"), ("Jazz Fest Guide", "tab_guide"),
        ("WWOZ Archive", "tab_archive"), ("Weekly Favorites", "tab_fav")]
 
@@ -199,7 +293,7 @@ def apply_style(root):
     # the notebook's own tabs are hidden; the masthead's street-sign menu switches pages
     st.layout("Bare.TNotebook.Tab", [])
     st.configure("Bare.TNotebook", background=BG, borderwidth=0, tabmargins=0)
-    st.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=INK, rowheight=27,
+    st.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=INK, rowheight=px(27),
                  bordercolor=LINE, lightcolor=PANEL, darkcolor=LINE, font=FONT)
     st.configure("Treeview.Heading", background="#efe4d0", foreground=TILE, font=FONT_HEAD,
                  bordercolor=LINE, relief="flat", padding=(6, 5))
@@ -221,8 +315,9 @@ def style_text(t):
 def draw_railing(c, width, height=30):
     """The cast-iron lace under a French Quarter gallery: a top rail with arches hanging
     from it, a rosette under each arch, thin balusters between, a light bottom rail, and
-    a heavier post every sixth panel."""
+    a heavier post every sixth panel. Drawn at 100% and then scaled to the screen."""
     c.delete("all")
+    width = int(width / UI) + 1
     unit, top, bot = 34, 4, height - 2
     c.create_rectangle(0, 0, width, top, fill=IRON, outline="")
     c.create_line(0, bot, width, bot, fill=IRON, width=2)
@@ -244,20 +339,24 @@ def draw_railing(c, width, height=30):
         c.create_line(cx, 21 + r, cx, bot, fill=IRON, width=1)
         for dx in (-7, 7):
             c.create_oval(cx + dx - 1.5, 20, cx + dx + 1.5, 23, fill=IRON, outline="")
+    if UI != 1:
+        c.scale("all", 0, 0, UI, UI)
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        set_ui_scale(self)
+        pick_fonts(self)
         self.title(APP)
         # fit the screen it opens on: a small laptop (1280x800, or a Mac's 1024x768 at its
         # largest text) is smaller than the 1240x880 the app likes, and a minimum size
         # bigger than the screen pushes the window off its edge and under the Dock
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w, h = min(1240, sw - 40), min(880, sh - 120)
-        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, min(40, sh - h - 100))}")
-        self.minsize(min(1100, w), min(720, h))
-        self.compact = h < 760 or w < 1100       # a small screen: trim what can go
+        w, h = min(px(1240), sw - px(40)), min(px(880), sh - px(120))
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, min(px(40), sh - h - px(100)))}")
+        self.minsize(min(px(1100), w), min(px(720), h))
+        self.compact = h < px(760) or w < px(1100)       # a small screen: trim what can go
         try:
             if MAC:                                  # the Dock's icon (a Mac reads no .ico)
                 self.iconphoto(True, tk.PhotoImage(file=str(SCRIPT_DIR / "wwoz.png")))
@@ -267,9 +366,11 @@ class App(tk.Tk):
             pass
         apply_style(self)
         self._slots = None          # weekly schedule slots, read once from wwoz_schedule.json
+        self._schedule_loading = False   # the first (or weekly) read of wwoz.org is under way
         self._last_now = None       # song row last scrolled into view
 
         self.player = None          # wwoz_player.Player, started by _init_player
+        self._play_error_said = ""  # the playback error last shown, so it is shown once
         self.current_file = None
         self.live = False           # playing WWOZ's live stream rather than a file
         self.rows = []            # tracklist rows (dicts, FIELDS keys)
@@ -291,6 +392,7 @@ class App(tk.Tk):
         # background work (see _next_job): one job at a time, Shazam only while nothing plays
         self.job_text = ""
         self._job_done = set()
+        self._job_tried = {}        # when a song list was last fetched (see _next_job)
         self._job_proc = None
         self._closing = False
         self.scan_now = None
@@ -328,8 +430,17 @@ class App(tk.Tk):
         # ---- activity: the chalkboard at the bottom of every page ----
         logf = tk.Frame(self, background=SLATE)
         logf.pack(fill="x", side="bottom")
-        tk.Label(logf, text="ACTIVITY", background=SLATE, foreground=GOLD_HI, font=FONT_SIGN,
-                 anchor="w").pack(fill="x", padx=12, pady=(6, 0))
+        head = tk.Frame(logf, background=SLATE)
+        head.pack(fill="x", padx=12, pady=(6, 0))
+        tk.Label(head, text="ACTIVITY", background=SLATE, foreground=GOLD_HI, font=FONT_SIGN,
+                 anchor="w").pack(side="left")
+        # errors go to the program's maker on their own (wwoz_report); this box turns that off
+        self.report_var = tk.BooleanVar(value=bool(wwoz_report and wwoz_report.enabled()))
+        tk.Checkbutton(head, text="Send error reports", variable=self.report_var,
+                       command=lambda: wwoz_report and wwoz_report.set_enabled(self.report_var.get()),
+                       background=SLATE, foreground=CHALK, activebackground=SLATE,
+                       activeforeground=GOLD_HI, selectcolor=SLATE, highlightthickness=0, bd=0,
+                       font=FONT_SM, cursor="hand2").pack(side="right")
         self.log = tk.Text(logf, height=2 if self.compact else 4, wrap="word", state="disabled", relief="flat",
                            background=SLATE, foreground=CHALK, insertbackground=CHALK,
                            highlightthickness=0, padx=12, pady=4, font=FONT_LOG)
@@ -399,16 +510,16 @@ class App(tk.Tk):
             self.nav_items.append((attr, lbl, bar))
             self.bind_all(f"<{MOD}-Key-{i + 1}>", lambda e, a=attr: self.nb.select(getattr(self, a)))
 
-        stripe = tk.Canvas(band, height=5, background=IRON, highlightthickness=0)
+        stripe = tk.Canvas(band, height=px(5), background=IRON, highlightthickness=0)
         stripe.pack(fill="x")
 
         def paint_stripe(e):
             stripe.delete("all")
             w = e.width / 3
             for k, color in enumerate((PURPLE, GREEN, GOLD)):
-                stripe.create_rectangle(k * w, 0, (k + 1) * w + 1, 5, fill=color, outline="")
+                stripe.create_rectangle(k * w, 0, (k + 1) * w + 1, px(5), fill=color, outline="")
         stripe.bind("<Configure>", paint_stripe)
-        rail = tk.Canvas(self, height=30, background=BG, highlightthickness=0)
+        rail = tk.Canvas(self, height=px(30), background=BG, highlightthickness=0)
         rail.pack(fill="x", side="top")
         rail.bind("<Configure>", lambda e: draw_railing(rail, e.width))
         self.after(500, self._update_on_air)
@@ -429,8 +540,9 @@ class App(tk.Tk):
             lbl.configure(foreground=GOLD_HI if on else ("#ffffff" if k == hover else CREAM))
             bar.configure(background=GOLD if on else ("#5a5160" if k == hover else IRON))
 
-    def _update_on_air(self):
-        """What WWOZ is broadcasting right now, from the weekly schedule."""
+    def _update_on_air(self, again=True):
+        """What WWOZ is broadcasting right now, from the weekly schedule (looked at again
+        every 30 seconds; again=False only refreshes it now)."""
         slot = self._slot_at(datetime.now(wwoz.TZ))
         if slot:
             self.air_lbl.configure(text=slot["title"])
@@ -438,8 +550,10 @@ class App(tk.Tk):
                                    " Central")
         else:
             self.air_lbl.configure(text="WWOZ, New Orleans")
-            self.air_sub.configure(text="schedule not loaded yet")
-        self.after(30_000, self._update_on_air)
+            self.air_sub.configure(text="loading the schedule…" if self._schedule_loading
+                                   else "schedule not loaded yet")
+        if again:
+            self.after(30_000, self._update_on_air)
 
     def toggle_live(self):
         """Play WWOZ's live stream (or stop it)."""
@@ -468,8 +582,8 @@ class App(tk.Tk):
         self.about_lbl.grid_remove()
         self.resume_btn.grid_remove()
         self.title(f"WWOZ live - {APP}")
+        self._play_error_said = ""
         self.player.open_stream(wwoz.STREAM_URL)
-        self.after(2500, self._check_playback)
         self.play_btn.config(text="Pause")
         self.pos_var.set(0)
         self.time_lbl.config(text="LIVE")
@@ -481,7 +595,7 @@ class App(tk.Tk):
         t = self.tab_player
         pw = ttk.PanedWindow(t, orient="horizontal")
         pw.pack(fill="both", expand=True, padx=10, pady=(10, 6))
-        self.after(150, lambda: pw.sashpos(0, min(400, int(self.winfo_width() * 0.33))))
+        self.after(150, lambda: pw.sashpos(0, min(px(400), int(self.winfo_width() * 0.33))))
 
         # ---- library: every recording, grouped; one click plays ----
         lib = ttk.Frame(pw)
@@ -498,8 +612,9 @@ class App(tk.Tk):
         body = ttk.Frame(lib)
         body.pack(fill="both", expand=True)
         self.lib_tree = ttk.Treeview(body, columns=("when",), show="tree", selectmode="browse")
-        self.lib_tree.column("#0", width=150 if self.compact else 190, minwidth=120, stretch=True)
-        self.lib_tree.column("when", width=80 if self.compact else 100, minwidth=70, anchor="e", stretch=False)
+        self.lib_tree.column("#0", width=px(150 if self.compact else 190), minwidth=px(120), stretch=True)
+        self.lib_tree.column("when", width=px(80 if self.compact else 100), minwidth=px(70), anchor="e",
+                             stretch=False)
         ysb = ttk.Scrollbar(body, orient="vertical", command=self.lib_tree.yview)
         self.lib_tree.configure(yscrollcommand=ysb.set)
         self.lib_tree.pack(side="left", fill="both", expand=True)
@@ -509,6 +624,7 @@ class App(tk.Tk):
         self.lib_tree.tag_configure("cut", foreground=PURPLE)
         self.lib_tree.tag_configure("set", foreground=GREEN)
         self.lib_tree.tag_configure("playing", background=BRASS_BG)
+        self.lib_tree.tag_configure("hint", foreground=INK2)
         self.lib_tree.bind("<ButtonRelease-1>", self._lib_click)
         self.lib_tree.bind("<Return>", lambda e: self.open_selected())
         self.lib_paths = {}
@@ -518,18 +634,18 @@ class App(tk.Tk):
         pw.add(right, weight=3)
         card = tk.Frame(right, background=PANEL, highlightthickness=1, highlightbackground=LINE)
         card.pack(fill="x")
-        tk.Frame(card, width=5, background=GOLD).pack(side="left", fill="y")    # gas-lamp edge
+        tk.Frame(card, width=px(5), background=GOLD).pack(side="left", fill="y")    # gas-lamp edge
         head = ttk.Frame(card, style="Panel.TFrame", padding=(16, 12))
         head.pack(side="left", fill="both", expand=True)
         head.columnconfigure(0, weight=1)
         self.now_lbl = ttk.Label(head, text="Pick a show on the left", style="Title.TLabel",
-                                 wraplength=760)
+                                 wraplength=px(760))
         self.now_lbl.grid(row=0, column=0, sticky="w")
         self.sub_lbl = ttk.Label(head, text="It starts playing right away, and its songs are "
                                             "listed below. Click any song to jump to it.",
-                                 style="Meta.TLabel", wraplength=760)
+                                 style="Meta.TLabel", wraplength=px(760))
         self.sub_lbl.grid(row=1, column=0, sticky="w", pady=(2, 0))
-        self.about_lbl = ttk.Label(head, text="", style="Panel.TLabel", wraplength=760, font=FONT_SM)
+        self.about_lbl = ttk.Label(head, text="", style="Panel.TLabel", wraplength=px(760), font=FONT_SM)
         self.about_lbl.grid(row=2, column=0, sticky="w", pady=(4, 0))
         self.about_lbl.grid_remove()
         self.resume_btn = ttk.Button(head, text="", style="Link.TButton", command=self._resume)
@@ -549,7 +665,7 @@ class App(tk.Tk):
         if not self.compact:
             ttk.Label(ctrl, text="Volume", style="Meta.TLabel").pack(side="left", padx=(28, 6))
         self.vol = tk.IntVar(value=int(self.state.get("_volume", 90)))
-        ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=70 if self.compact else 110,
+        ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=px(70 if self.compact else 110),
                   command=lambda v: self.player and
                   self.player.set_volume(float(v) / 100)).pack(side="left")
 
@@ -572,7 +688,7 @@ class App(tk.Tk):
 
         def rewrap(e):                               # text wraps to the card, whatever its width
             for w in (self.now_lbl, self.sub_lbl, self.about_lbl, keys):
-                w.configure(wraplength=max(300, e.width - 40))
+                w.configure(wraplength=max(px(300), e.width - px(40)))
         head.bind("<Configure>", rewrap)
 
         # ---- songs: one click jumps ----
@@ -593,7 +709,7 @@ class App(tk.Tk):
         for c, head_txt, w in [("time", "Time", 80), ("artist", "Artist", 230),
                                ("song", "Song", 320), ("show", "Source", 170)]:
             self.tree.heading(c, text=head_txt, anchor="w")
-            self.tree.column(c, width=w, anchor="w")
+            self.tree.column(c, width=px(w), anchor="w")
         ysb = ttk.Scrollbar(songs, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ysb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -685,7 +801,7 @@ class App(tk.Tk):
                                        selectmode="browse")
         for c, w, grow in [("date", 190, False), ("name", 420, True), ("source", 360, True), ("size", 80, False)]:
             self.shows_tree.heading(c, text=c.title(), anchor="w", command=lambda c=c: self._sort_shows(c))
-            self.shows_tree.column(c, width=w, anchor="e" if c == "size" else "w", stretch=grow)
+            self.shows_tree.column(c, width=px(w), anchor="e" if c == "size" else "w", stretch=grow)
         ysb = ttk.Scrollbar(mid, orient="vertical", command=self.shows_tree.yview)
         self.shows_tree.configure(yscrollcommand=ysb.set)
         self.shows_tree.pack(side="left", fill="both", expand=True)
@@ -762,10 +878,14 @@ class App(tk.Tk):
                     when += "  " + t.strftime("%I:%M%p").lstrip("0").lower()
             self.shows_tree.insert("", "end", iid=str(i),
                                    values=(when, e["name"], e["source"], f"{size(e) >> 20} MB"))
+        if not self.show_entries:
+            self.shows_tree.insert("", "end", iid="hint", values=(
+                "", "Nothing yet. Shows you download on the WWOZ Archive page, or record, "
+                    "appear here one file each.", "", ""))
 
     def _show_sel(self):
         sel = self.shows_tree.focus()
-        return self.show_entries[int(sel)] if sel else None
+        return self.show_entries[int(sel)] if sel and sel.isdigit() else None
 
     def _show_songs(self):
         e = self._show_sel()
@@ -843,7 +963,7 @@ class App(tk.Tk):
                                   selectmode="extended")
         for c, w, grow in [("time", 120, False), ("artist", 480, True), ("stage", 280, True)]:
             self.guide.heading(c, text=c.title(), anchor="w")
-            self.guide.column(c, width=w, anchor="w", stretch=grow)
+            self.guide.column(c, width=px(w), anchor="w", stretch=grow)
         ysb = ttk.Scrollbar(t, orient="vertical", command=self.guide.yview)
         self.guide.configure(yscrollcommand=ysb.set)
         self.guide.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=4)
@@ -970,7 +1090,7 @@ class App(tk.Tk):
         self.arch = ttk.Treeview(t, columns=cols, show="headings", selectmode="extended")
         for c, w, grow in [("date", 150, False), ("time", 70, False), ("title", 700, True)]:
             self.arch.heading(c, text=c.title(), anchor="w")
-            self.arch.column(c, width=w, anchor="w", stretch=grow)
+            self.arch.column(c, width=px(w), anchor="w", stretch=grow)
         self.arch.tag_configure("have", foreground=GREEN)
         self.arch.tag_configure("fest", foreground=PURPLE)
         self.arch.bind("<Double-Button-1>", lambda e: self.download_selected())
@@ -987,7 +1107,7 @@ class App(tk.Tk):
                           f"Sunday at 9 AM {'your Mac' if MAC else 'Windows'} downloads their new episodes. "
                           "Click a show's name to read "
                           "about it and what it plays. \"Download an episode\" grabs one right now.",
-                  style="Hint.TLabel", justify="left", wraplength=1120).pack(anchor="w", padx=10, pady=(0, 8))
+                  style="Hint.TLabel", justify="left", wraplength=px(1120)).pack(anchor="w", padx=10, pady=(0, 8))
         bf = ttk.Frame(t)
         bf.pack(fill="x", padx=10, pady=(0, 4))
         ttk.Button(bf, text="Save favorites", command=self.save_favorites).pack(side="left")
@@ -1403,11 +1523,21 @@ class App(tk.Tk):
                                         values=("",), tags=("cut",))
                             self.lib_paths[str(c)] = c
 
+        if not tree.get_children(""):                 # nothing yet (or nothing matches): say why
+            lines = (["Nothing matches that search."] if flt else
+                     ["No recordings yet.", "Click here to download shows", "from WWOZ's archive, or click",
+                      "Listen live at the top."])
+            for k, text in enumerate(lines):
+                tree.insert("", "end", iid=f"::empty{k}", text=text, values=("",), tags=("hint",))
+
     def _lib_click(self, event):
         iid = self.lib_tree.identify_row(event.y)
         if not iid or "indicator" in self.lib_tree.identify_element(event.x, event.y):
             return                                   # the ▸ expander only opens/closes
         path = self.lib_paths.get(iid)
+        if iid.startswith("::empty") and not self.lib_filter.get().strip():
+            self.nb.select(self.tab_archive)         # the empty library's "click here"
+            return
         if path is None:                             # a section header
             self.lib_tree.item(iid, open=not self.lib_tree.item(iid, "open"))
             return
@@ -1441,6 +1571,7 @@ class App(tk.Tk):
             self.player.set_volume(self.vol.get() / 100)
         except Exception as e:
             self.player = None
+            log_error()
             messagebox.showerror(APP, f"The sound player couldn't start, so recordings won't play.\n\n{e}")
             return
         self.after(1500, self._player_ready)
@@ -1459,7 +1590,7 @@ class App(tk.Tk):
         if p.state == "error" and p.error and p.error != said:
             self.logln(f"sound player: {p.error}")
             said = p.error
-            if "isn't installed" in p.error:
+            if "couldn't be loaded" in p.error:
                 messagebox.showerror(APP, f"Recordings can't play yet.\n\n{p.error}")
                 return
         if tries < 60:                                   # keep looking for two minutes
@@ -1497,10 +1628,10 @@ class App(tk.Tk):
         saved = self.state.get(str(path), 0)
         if self.player:
             start = saved if resume and saved > 20 else 0
+            self._play_error_said = ""
             self.player.open(path, start=start)
             self.play_btn.config(text="Pause")
             self.logln(f"playing {info['title']}")
-            self.after(1500, self._check_playback)
             if start:
                 self.logln(f"resumed at {fmt(saved)}")
         else:
@@ -1516,14 +1647,21 @@ class App(tk.Tk):
             self.open_file(self.current_file, resume=True)
 
     def _check_playback(self):
+        """Say once when what is playing stops with an error (called on every tick, so a
+        live stream that can't be reached is reported when the player gives up on it)."""
         if not (self.player and (self.current_file or self.live)):
             return
-        if self.player.state == "error":
+        err = self.player.error
+        if self.player.state == "error" and err and err != self._play_error_said:
+            self._play_error_said = err
             what = "The live stream" if self.live else "This recording"
             self.logln(f"playback problem with {'the live stream' if self.live else self.current_file.name}: "
-                       f"{self.player.error}")
-            log_line(f"playback problem: {self.player.error}")
-            err = self.player.error
+                       f"{err}")
+            log_line(f"playback problem: {err}")
+            if self.live:                            # the Listen live button can start it again
+                self.live = False
+                self.live_btn.configure(text="▶  Listen live", background=GOLD, foreground=IRON)
+                self.time_lbl.config(text="0:00:00 / 0:00:00")
             messagebox.showerror(APP, f"{what} wouldn't play.\n\n{err[:1].upper()}{err[1:]}")
 
     def toggle_play(self):
@@ -1534,6 +1672,7 @@ class App(tk.Tk):
             self.play_btn.config(text="Play")
         else:
             if self.live and self.player.state == "stopped":
+                self._play_error_said = ""
                 self.player.open_stream(wwoz.STREAM_URL)               # start it again
             else:
                 self.player.play()
@@ -1614,6 +1753,7 @@ class App(tk.Tk):
 
     def _tick(self):
         if self.player and (self.current_file or self.live):
+            self._check_playback()
             # keep the button honest when the player stops or reaches the end on its own
             want = "Pause" if self.player.is_playing else "Play"
             if self.play_btn.cget("text") != want:
@@ -1797,8 +1937,8 @@ class App(tk.Tk):
             minvalue=0.1, maxvalue=24)
         if not hrs:
             return
-        stop = threading.Event()
-        self.rec_stop = stop
+        stop, done = threading.Event(), threading.Event()
+        self.rec_stop, self._rec_done = stop, done
         self.rec_btn.config(text="■ Stop recording")
 
         def work():
@@ -1806,10 +1946,14 @@ class App(tk.Tk):
                 wwoz.record_stream(hrs, RECORDINGS_DIR, stop_flag=stop)
             except Exception as e:
                 self.logln(f"recording ERROR: {e}")
+                log_error()
+                self.after(0, lambda e=e: messagebox.showerror(APP, f"The live recording stopped.\n\n{e}"))
             finally:
-                self.after(0, lambda: (self.rec_btn.config(text="Record live stream…"),
-                                       self.refresh_library()))
-                self.rec_stop = None
+                done.set()                       # the file is closed (see _on_close)
+                if self.rec_stop is stop:        # not a newer recording started after Stop
+                    self.rec_stop = None
+                    self.after(0, lambda: self.rec_btn.config(text="Record live stream…"))
+                self.after(0, self.refresh_library)
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ favorites --
@@ -1829,14 +1973,28 @@ class App(tk.Tk):
             try:
                 wwoz.fetch_schedule(refresh=True)
             except Exception as e:
-                self.logln(f"schedule refresh failed ({e}); the saved copy is still used")
+                log_error()
+                self.logln(f"couldn't get the weekly schedule from wwoz.org ({e}); "
+                           + ("the saved copy is still used" if data else
+                              "it is tried again the next time WWOZ Studio opens"))
                 return
+            finally:
+                self._schedule_loading = False
+                self.after(0, lambda: self._update_on_air(again=False))
+                if not data:                          # the Favorites page's note, either way
+                    self.after(0, self.load_favorites)
             self.after(0, self._schedule_refreshed)
-        self.logln("the weekly schedule is over a week old; refreshing it from wwoz.org in the background…")
+        self._schedule_loading = True
+        self._update_on_air(again=False)
+        if not data:
+            self.load_favorites()                     # "loading" rather than "click Refresh"
+        self.logln("getting WWOZ's weekly schedule for the first time (a couple of minutes)…" if not data else
+                   "the weekly schedule is over a week old; refreshing it from wwoz.org in the background…")
         threading.Thread(target=work, daemon=True).start()
 
     def _schedule_refreshed(self):
         self._slots = None
+        self._update_on_air(again=False)
         self.load_favorites()
         self.refresh_library()
 
@@ -1868,8 +2026,11 @@ class App(tk.Tk):
         favs = cfg.get("favorites", [])
         slots = self._schedule_slots()
         if not slots:
-            ttk.Label(self.fav_frame, text="No schedule yet — click \"Refresh schedule from "
-                      "wwoz.org\" (takes a couple of minutes).").pack(anchor="w", pady=6)
+            ttk.Label(self.fav_frame, text=(
+                "Loading WWOZ's weekly schedule from wwoz.org. The first time takes a couple of "
+                "minutes; the shows appear here when it's done." if self._schedule_loading else
+                "No schedule yet. Click \"Refresh schedule from wwoz.org\" (it takes a couple of "
+                "minutes).")).pack(anchor="w", pady=6)
 
         def enabled_for(slot):
             for f in favs:
@@ -1943,7 +2104,7 @@ class App(tk.Tk):
             else:
                 favs.append({"match": r["match"], "enabled": bool(r["var"].get())})
         cfg["favorites"] = favs
-        wwoz.CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        wwoz.save_config(cfg)
         on = [f["match"] for f in favs if f["enabled"]]
         self.logln(f"favorites saved ({len(on)} enabled): " + (", ".join(on) if on else "(none)"))
 
@@ -2009,6 +2170,10 @@ class App(tk.Tk):
         self._bg(fetch, done=choose)
 
     def refresh_schedule(self):
+        if self._schedule_loading:
+            messagebox.showinfo(APP, "The schedule is already being loaded from wwoz.org. "
+                                     "The shows appear on this page when it's done.")
+            return
         self._bg(lambda: wwoz.fetch_schedule(refresh=True), done=self._schedule_refreshed)
 
     def run_weekly(self):
@@ -2033,6 +2198,7 @@ class App(tk.Tk):
                     got.append(wwoz.download_show(s, dest))
                 except Exception as e:
                     self.logln(f"    FAILED: {e}")
+                    log_error()
             self._cut_new_festivals(got)
         self._bg(work, done=lambda: (self.refresh_library(), self.refresh_shows(), self.load_favorites()))
 
@@ -2069,8 +2235,13 @@ class App(tk.Tk):
 
     def _next_job(self):
         """The next piece of background work: (what the status line says, function, key),
-        or None. A key that failed once this session is not tried again until restart."""
+        or None. A key that failed once this session is not tried again until restart;
+        a song list that couldn't be fetched (no internet, say) is tried again an hour
+        later, not every few seconds."""
         now = time.time()
+
+        def due(key):
+            return key not in self._job_done and now - self._job_tried.get(key, 0) >= 3600
         for p in sorted(RECORDINGS_DIR.iterdir()):
             if p.suffix.lower() not in AUDIO_EXT or not p.is_file():
                 continue
@@ -2079,7 +2250,7 @@ class App(tk.Tk):
             name = self._describe(p)["title"]
             tl = wwoz.tracklist_csv(p)
             key = (str(p), "tracklist")
-            if not tl.exists() and key not in self._job_done:
+            if not tl.exists() and due(key):
                 return (f"getting the DJs' song list for {name}", lambda p=p: wwoz.fetch_tracklist_or_mark(p), key)
             key = (str(p), "autocut")
             if (key not in self._job_done and p != self.current_file
@@ -2099,7 +2270,7 @@ class App(tk.Tk):
         for m in sorted(arch.glob("*.tracklist.failed")) if arch.exists() else []:
             p = Path(str(m)[:-len(".tracklist.failed")] + ".mp3")
             key = (str(p), "retry-tracklist")
-            if key not in self._job_done:
+            if due(key):
                 return (f"trying the song list again for {self._describe(p)['title']}",
                         lambda p=p: wwoz.fetch_tracklist_or_mark(p), key)
         for fest, folder, sets, casts in self._fests:
@@ -2154,7 +2325,9 @@ class App(tk.Tk):
                 self.logln(f"couldn't finish {label}: {e}  (details in {ERROR_LOG.name})")
                 log_error()
             else:
-                if key[1] in ("retry-tracklist", "shazam", "programs"):
+                if key[1] in ("tracklist", "retry-tracklist"):
+                    self._job_tried[key] = time.time() # once an hour at most
+                elif key[1] in ("shazam", "programs"):
                     self._job_done.add(key)            # once a session is enough
             finally:
                 self.job_text = ""
@@ -2226,11 +2399,18 @@ class App(tk.Tk):
     # ---------------------------------------------------------------- close --
 
     def _on_close(self):
+        if self.rec_stop and not messagebox.askyesno(
+                APP, "WWOZ Studio is recording the live stream. Closing stops the recording; "
+                     "what it has recorded so far is kept.\n\nClose anyway?"):
+            return
         if self.busy and not messagebox.askyesno(
-                APP, "A task is still running (see Activity). Closing now stops it partway, "
-                     "and a long one such as Auto-detect sets would start over next time.\n\n"
+                APP, "Something is still running (see Activity), such as a download. Closing now "
+                     "stops it partway; a download picks up where it left off next time.\n\n"
                      "Close anyway?"):
             return
+        if self.rec_stop:                            # let the recording close its file
+            self.rec_stop.set()
+            self._rec_done.wait(timeout=5)
         proc = self._job_proc
         if proc and proc.poll() is None:
             if not messagebox.askyesno(
@@ -2262,7 +2442,21 @@ def main():
             sys.stderr = sys.stderr or stream
         except OSError:
             pass
-    app = App()
+    if os.name == "nt":
+        # draw at the screen's real resolution (see UI): without this, Windows stretches
+        # the whole window on a screen set above 100%, and every letter comes out blurry
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
+    try:
+        app = App()
+    except Exception as e:
+        cannot_start(e, ERROR_LOG)
+    for problem in (wwoz.RECORDINGS_PROBLEM, wwoz.SETTINGS_PROBLEM):
+        if problem:          # a missing recordings drive, a settings file that was started over
+            app.after(800, lambda p=problem: messagebox.showwarning(APP, p, parent=app))
     app.report_callback_exception = lambda *exc: (log_error_from(exc), app.logln(
         f"ERROR: {exc[1]}  (details in {ERROR_LOG.name})"))
     if "--selftest" in sys.argv:

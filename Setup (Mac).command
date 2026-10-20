@@ -17,13 +17,19 @@
 #   --dry-run             say what it would do, and change nothing
 #   --with-set-detection  install the set finder without asking
 #   --no-weekly           skip the Sunday download without asking
+#   --report-test         send a test error report, to check that reports arrive, and stop
+#
+# If Setup stops, it sends a short error report to the person who made WWOZ Studio (what
+# went wrong and at which step, the macOS version; your user name is taken out), the
+# same reports the app sends (see wwoz_report.py). WWOZ_NO_REPORTS=1 turns that off.
 
-DRY=0 SETS=0 NOWEEKLY=0
+DRY=0 SETS=0 NOWEEKLY=0 REPORTTEST=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --with-set-detection) SETS=1 ;;
         --no-weekly) NOWEEKLY=1 ;;
+        --report-test) REPORTTEST=1 ;;
         *) echo "Unknown option: $arg (see the top of this file)"; exit 2 ;;
     esac
 done
@@ -39,8 +45,47 @@ LABEL="local.wwoz-studio.weekly"
 AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 yellow=$'\033[33m' red=$'\033[31m' cyan=$'\033[36m' plain=$'\033[0m'
-step() { echo; echo "${yellow}== $1${plain}"; }
-fail() { echo; echo "${red}Setup stopped: $1${plain}"; finish 1; }
+STEP="starting"
+PIPLOG="${TMPDIR:-/tmp}/wwoz-setup-pip.log"
+step() { STEP="$1"; echo; echo "${yellow}== $1${plain}"; }
+fail() {
+    echo; echo "${red}Setup stopped: $1${plain}"
+    local log=""
+    [ "$STEP" = "Python packages" ] && log="$PIPLOG"
+    send_report "$1" "$log" && echo "A short report of this went to the person who made WWOZ Studio."
+    finish 1
+}
+# json "text": the text as a JSON string (tabs to spaces, other control characters
+# dropped, quotes, backslashes and line breaks escaped)
+json() {
+    printf '"%s"' "$(printf '%s' "$1" | LC_ALL=C tr '\t' ' ' | LC_ALL=C tr -d '\000-\010\013-\037' \
+        | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'BEGIN { ORS = "\\n" } { print }' | sed -e 's/\\n$//')"
+}
+# scrub "text": the user's home folder becomes ~ and their user name <user>
+scrub() {
+    local t
+    t="$(printf '%s' "$1" | sed "s|$HOME|~|g")"
+    if [ "${#USER}" -gt 2 ]; then
+        t="$(printf '%s' "$t" | sed -E "s/(^|[^A-Za-z0-9])$USER([^A-Za-z0-9]|$)/\1<user>\2/g")"
+    fi
+    printf '%s' "$t"
+}
+# send_report "what went wrong" [log file]: the error report described at the top
+send_report() {
+    [ "$DRY" = 1 ] && return 1
+    [ -n "$WWOZ_NO_REPORTS" ] && return 1
+    local kind="Setup stopped (Mac)" msg detail="" version fp url
+    msg="$(scrub "$STEP: $1")"
+    [ -n "$2" ] && [ -f "$2" ] && detail="$(scrub "$(tail -n 40 "$2")")"
+    version="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$here/wwoz_report.py" 2>/dev/null)"
+    fp="$(printf '%s' "$kind|$(printf '%s' "$msg" | sed -E 's/[0-9]+/#/g')" | shasum | cut -c1-16)"
+    url="${WWOZ_REPORT_URL:-https://wwoz-studio-reports.ericwp1989.workers.dev/report}"
+    curl -fsS --max-time 15 -o /dev/null -H "Content-Type: application/json" -X POST "$url" --data-binary \
+        "{\"app\": \"WWOZ Studio\", \"kind\": $(json "$kind"), \"message\": $(json "$msg"), \
+\"traceback\": $(json "$detail"), \"version\": $(json "${version:-unknown} (setup)"), \
+\"system\": $(json "macOS $(sw_vers -productVersion 2>/dev/null), $(uname -m)"), \"python\": \"\", \
+\"install\": \"setup\", \"fingerprint\": \"$fp\"}" 2>/dev/null
+}
 finish() {
     # Terminal keeps the window open after a double-click, but say so plainly
     echo; [ "$DRY" = 1 ] || echo "You can close this window now."
@@ -64,10 +109,17 @@ ask() {
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+if [ "$REPORTTEST" = 1 ]; then
+    if send_report "a test report from Setup --report-test"; then echo "Test report sent."
+    else echo "The test report couldn't be sent (no internet, reports turned off, or the receiver isn't up yet)."; fi
+    exit 0
+fi
+
 [ "$(uname)" = Darwin ] || fail "this setup is for a Mac. On Windows, double-click Setup.cmd."
 
 echo "${cyan}Setting up WWOZ Studio in $here${plain}"
 [ "$DRY" = 1 ] && echo "(dry run: nothing will be changed)"
+echo "(If Setup stops, it sends a short error report to the person who made WWOZ Studio.)"
 
 step "Homebrew (installs the programs below)"
 BREW="$(command -v brew)"
@@ -118,7 +170,10 @@ else
     run "WWOZ Studio's own Python, in $VENV" "$PY" -m venv --clear "$VENV" \
         || fail "couldn't make WWOZ Studio's Python in $VENV."
 fi
-pip_install() { "$VENV/bin/python" -m pip install --upgrade --disable-pip-version-check -r "$1"; }
+pip_install() {   # pip's own log goes in $PIPLOG, for a report if it fails
+    rm -f "$PIPLOG"
+    "$VENV/bin/python" -m pip install --upgrade --disable-pip-version-check --log "$PIPLOG" -r "$1"
+}
 run "pip install -r requirements.txt" pip_install "$here/requirements.txt" \
     || fail "pip couldn't install the packages."
 if [ "$SETS" = 1 ] || ask "Also install the Jazz Fest set finder? It's about a 2 GB download." n; then

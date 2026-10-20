@@ -20,6 +20,7 @@ Run  py -3.12 wwoz.py <command> --help  for options.
 
 import argparse
 import asyncio
+import atexit
 import csv
 import html
 import json
@@ -35,7 +36,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import requests
+try:
+    import requests
+except ImportError:          # in Python's personal package folder, which it left out (see there)
+    import wwoz_player
+    wwoz_player.see_personal_packages()
+    import requests
 
 TZ = ZoneInfo("America/Chicago")  # WWOZ local time; recordings assumed made on a Central-time PC
 NOWIN = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # no console flash from GUI
@@ -95,23 +101,39 @@ def _move_old_state():
                 pass
 
 
+def _default_recordings_dir():
+    return _known_folder("4BD8D571-6D19-48D3-BE97-422220080E43", "Music") / "WWOZ recordings"
+
+
 def _recordings_dir():
     """The recordings folder: WWOZ_RECORDINGS, else the settings' 'recordings_dir', else
     a 'WWOZ recordings' folder in Music, made on first run."""
     if os.environ.get("WWOZ_RECORDINGS"):
         return Path(os.environ["WWOZ_RECORDINGS"])
     try:
-        chosen = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("recordings_dir")
+        chosen = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig")).get("recordings_dir")
         if chosen:
             return Path(chosen)
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         pass
-    return _known_folder("4BD8D571-6D19-48D3-BE97-422220080E43", "Music") / "WWOZ recordings"
+    return _default_recordings_dir()
 
 
 _move_old_state()
 RECORDINGS_DIR = _recordings_dir()
-RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+RECORDINGS_PROBLEM = ""         # why the chosen folder isn't in use this time, for the app to say
+SETTINGS_PROBLEM = ""           # why the settings file was started over, for the app to say
+try:
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as e:
+    # the chosen folder is on a drive that isn't there (a USB drive left unplugged, a
+    # network drive that dropped): use the usual folder for now instead of not starting
+    _fallback = _default_recordings_dir()
+    RECORDINGS_PROBLEM = (f"Your recordings folder, {RECORDINGS_DIR}, can't be reached right now "
+                          f"({e.strerror or e}). If it's on a drive that isn't plugged in, plug it in "
+                          f"and open WWOZ Studio again. Until then, recordings go in {_fallback}.")
+    RECORDINGS_DIR = _fallback
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_CONFIG = {
     "_help": [
@@ -122,21 +144,43 @@ DEFAULT_CONFIG = {
         "slot too, because the archive titles some shows differently from the schedule.",
         "'enabled': true downloads new episodes weekly. 'recordings_dir' is the folder for",
         "your recordings (blank: 'WWOZ recordings' in Music). 'download_dir' is relative to",
-        "the recordings folder unless you give an absolute path.",
+        "the recordings folder unless you give an absolute path. 'send_error_reports': false",
+        "stops the error reports described in wwoz_report.py.",
     ],
     "recordings_dir": "",
     "download_dir": "archive_downloads",
-    "favorites": [
-        {"match": "R&B with Your Cousin Dimitri", "day": "thursday", "start": "19:00", "enabled": False},
-    ],
+    "send_error_reports": True,
+    "favorites": [],
 }
+
+
+def write_text_atomic(path, text):
+    """Write a file whole or not at all: whoever reads it at the same moment (the Sunday
+    task, the app) sees the old copy or the new one, never half of one, and a crash
+    mid-save leaves the old copy in place."""
+    path = Path(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.saving")
+    tmp.write_text(text, encoding="utf-8")
+    for n in range(30):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:          # Windows: another program is reading it this instant
+            if n == 29:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.1)
+
+
+def save_config(cfg):
+    write_text_atomic(CONFIG_PATH, json.dumps(cfg, indent=2, ensure_ascii=False))
 
 
 def set_recordings_dir(folder):
     """Save a new recordings folder in the settings (used from the next start)."""
     cfg = load_config()
     cfg["recordings_dir"] = str(folder)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    save_config(cfg)
 
 
 def out(msg=""):
@@ -146,9 +190,25 @@ def out(msg=""):
 def load_config():
     if not CONFIG_PATH.exists():
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
-        out(f"Created config template: {CONFIG_PATH}")
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        save_config(json.loads(json.dumps(DEFAULT_CONFIG)))
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))   # -sig: Notepad's old BOM
+        if not isinstance(cfg, dict):
+            raise ValueError("it isn't a settings file")
+        return cfg
+    except ValueError as e:
+        # broken by a hand edit: keep the old file, start fresh, and say so, rather than
+        # stop the app and the Sunday task from starting at all
+        bad = CONFIG_PATH.with_name(f"favorites (unreadable, {datetime.now(TZ):%Y-%m-%d %H%M}).json")
+        shutil.copy2(CONFIG_PATH, bad)
+        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+        save_config(cfg)
+        global SETTINGS_PROBLEM
+        SETTINGS_PROBLEM = (f"Your settings file couldn't be read ({e}), so WWOZ Studio started a "
+                            f"new one: pick your favorite shows again on the Weekly Favorites page. "
+                            f"The old file is saved as {bad}.")
+        out(SETTINGS_PROBLEM)
+        return cfg
 
 
 def download_dir_from_config(cfg):
@@ -161,7 +221,11 @@ def download_dir_from_config(cfg):
     d = Path(raw)
     if not d.is_absolute():
         d = (RECORDINGS_DIR / d).resolve()
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:                        # a download folder on a drive that isn't there
+        d = RECORDINGS_DIR / "archive_downloads"
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -169,6 +233,24 @@ class ToolError(RuntimeError):
     """A problem a caller can catch and log (a missing program, an unreadable file).
     Raised instead of sys.exit, which slipped past every `except Exception` and silently
     ended the Sunday task, a batch run, or the app's background scanner."""
+
+
+def report_error(kind, message=None):
+    """Send the error being handled to the program's maker (see wwoz_report.py). Waits up
+    to ten seconds, since the Sunday task may end right after; never raises."""
+    try:
+        import wwoz_report
+        if message is None:
+            wwoz_report.send_exception(kind, data_dir=DATA_DIR, wait=True)
+        else:
+            wwoz_report.send(kind, message, data_dir=DATA_DIR, wait=True)
+    except Exception:
+        pass
+
+
+class NoStartTime(ToolError):
+    """A recording whose name doesn't say when it was made, so no song list can be
+    looked up for it. Trying again won't help."""
 
 
 def _session():
@@ -197,7 +279,8 @@ def find_tool(name):
         for d in ("/opt/homebrew/bin", "/usr/local/bin"):
             if os.access(f"{d}/{name}", os.X_OK):
                 return f"{d}/{name}"
-        raise ToolError(f"{name} not found. Install with: brew install ffmpeg")
+        raise ToolError(f"{name} isn't installed. Double-click Setup (Mac).command in the "
+                        f"program's folder to add it.")
     # winget-installed ffmpeg may not be on PATH in this shell yet
     links = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / f"{name}.exe"
     if links.exists():
@@ -207,7 +290,8 @@ def find_tool(name):
         hits = sorted(pkgs.glob(f"*FFmpeg*/**/bin/{name}.exe"))
         if hits:
             return str(hits[-1])
-    raise ToolError(f"{name} not found. Install with: winget install Gyan.FFmpeg")
+    raise ToolError(f"{name} isn't installed. Double-click Setup.cmd in the program's folder "
+                    f"to add it.")
 
 
 _DURATIONS = {}
@@ -296,11 +380,18 @@ def http_download(url, dest: Path, attempts=3):
     lock = dest.with_suffix(dest.suffix + ".downloading")
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
         os.close(fd)
     except FileExistsError:
-        if time.time() - lock.stat().st_mtime < 3 * 3600:
+        try:
+            age = time.time() - lock.stat().st_mtime
+            holder = int(lock.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            age, holder = 0, 0
+        if age < 3 * 3600 and (holder == 0 or _process_alive(holder)):
             raise ToolError(f"{dest.name} is already being downloaded by another window or the Sunday task")
-        lock.touch()                                  # left by a download that crashed
+        lock.write_text(str(os.getpid()), encoding="utf-8")   # left by a download that was cut off
+    _HELD_LOCKS.add(lock)
     try:
         for n in range(1, attempts + 1):
             try:
@@ -312,6 +403,48 @@ def http_download(url, dest: Path, attempts=3):
                 time.sleep(10 * n)
     finally:
         lock.unlink(missing_ok=True)
+        _HELD_LOCKS.discard(lock)
+
+
+# Download locks this program holds. Closing the app mid-download ends the download
+# thread without its cleanup, which used to leave a lock that blocked that show for
+# three hours, the Sunday task included; they are removed as the program exits.
+_HELD_LOCKS = set()
+
+
+@atexit.register
+def _drop_held_locks():
+    for lock in list(_HELD_LOCKS):
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _process_alive(pid):
+    """Is a program with this process id still running? (A lock left by one that was
+    killed outright, or by a computer that restarted, belongs to nobody.)"""
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+        k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        h = k32.OpenProcess(0x1000, False, pid)              # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259   # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def _http_download_once(url, dest: Path):
@@ -380,9 +513,12 @@ def fetch_tracklist_or_mark(dest):
         build_tracklist(dest)
         mark.unlink(missing_ok=True)
         return True
+    except NoStartTime as e:
+        out(f"    no song list: {e}")
+        return False
     except Exception as e:
         mark.write_text(str(e), encoding="utf-8")
-        out(f"    tracklist failed ({e}); the Sunday task will try again")
+        out(f"    couldn't get the DJs' song list ({e}); it will be tried again later")
         return False
 
 
@@ -640,7 +776,7 @@ def fetch_schedule(weeks_ahead=4, refresh=False):
             "weeks": [min(datetime.fromtimestamp(int(it["start"]["timestamp"]), TZ).strftime("%Y-%m-%d")
                           for day in w.values() for it in day) for w in weeks],
             "slots": rows}
-    SCHEDULE_PATH.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+    write_text_atomic(SCHEDULE_PATH, json.dumps(data, indent=1, ensure_ascii=False))
     out(f"  saved {SCHEDULE_PATH.name} ({len(rows)} slots)")
     return data
 
@@ -923,8 +1059,8 @@ def build_tracklist(path: Path, start=None, duration=None):
     user's own) are kept; only the DJ-logged songs are replaced."""
     start = start or start_time_from_name(path)
     if start is None:
-        raise ToolError(f"can't parse a start time from '{path.name}'. "
-                        f"Pass --start \"YYYY-MM-DD HH:MM\".")
+        raise NoStartTime(f"the name '{path.name}' doesn't say when it was recorded, so the "
+                          f"DJs' song list can't be looked up")
     duration = duration or ffprobe_duration(path)
     end = start + timedelta(seconds=duration)
     out(f"  window: {start:%Y-%m-%d %I:%M %p} -> {end:%Y-%m-%d %I:%M %p} Central "
@@ -980,7 +1116,10 @@ def cmd_tracklist(args):
         start = end - timedelta(seconds=dur)
         out(f"  assuming recording ENDED at file mtime {end:%Y-%m-%d %I:%M %p} "
             f"(only valid if the file wasn't modified after recording)")
-    build_tracklist(path, start=start, duration=args.duration)
+    try:
+        build_tracklist(path, start=start, duration=args.duration)
+    except NoStartTime as e:
+        raise ToolError(f"{e}. Give the start with --start \"YYYY-MM-DD HH:MM\" (Central).")
 
 
 # -------------------------------------------------------------- identify ---
@@ -1759,14 +1898,27 @@ def load_broadcast_festivals():
 
 
 def festival_for(path, fests=None):
-    """The broadcast festival a download belongs to, judged by its archive title."""
+    """The broadcast festival a download belongs to, judged by its archive title and its
+    date: the titles carry no year, so next October's broadcasts of the same festival
+    must not count as this year's."""
     title = loose(archive_title(path))
     if not title:
         return None
+    st = start_time_from_name(Path(path))
     for f in load_broadcast_festivals() if fests is None else fests:
-        if loose(f.get("title_match")) and loose(f["title_match"]) in title:
+        if loose(f.get("title_match")) and loose(f["title_match"]) in title and _in_fest_dates(f, st):
             return f
     return None
+
+
+def _in_fest_dates(fest, when):
+    """Whether a time falls within a festival's days, give or take a day (a file with no
+    time in its name, or a festival with no days, is not ruled out)."""
+    days = sorted(fest.get("days") or {})
+    if not when or not days:
+        return True
+    first, last = _clock(days[0], "00:00") - timedelta(days=1), _clock(days[-1], "00:00") + timedelta(days=2)
+    return first <= when < last
 
 
 def festival_files(fest, dest_dir=None):
@@ -1888,16 +2040,33 @@ def cut_festival(fest, dest_dir=None):
     out_dir = festival_folder(fest)
     out_dir.mkdir(parents=True, exist_ok=True)
     before = {p.name for p in out_dir.iterdir() if SPLIT_NAME.match(p.name)}
+    earlier = _festival_index(out_dir)
+    earlier_sets = {e["file"]: e for e in earlier.get("sets", [])}
     album = f"{fest['name']} (WWOZ broadcast)"
     index, written = [], set()
+
+    def keep_earlier(name, why):
+        """A set that can't be cut this time keeps the file an earlier cut made."""
+        if name in earlier_sets and (out_dir / name).exists():
+            index.append(earlier_sets[name])
+            written.add(name)
+            out(f"  {name}: {why}; the earlier cut is kept")
+            return True
+        return False
+
+    have = {p.name for p in files}
     out(f"Cutting {fest['name']} into sets, from {len(files)} broadcast download(s):")
     for n, (a, b, s) in enumerate(set_bounds(fest, files), 1):
         pieces = [(max(a, w0), min(b, w1), p, w0) for w0, w1, p in windows if w0 < b and w1 > a]
+        name = sanitize(f"{n:02} - " + s["artist"].replace('"', "'")) + ".mp3"
+        old_from = set(earlier_sets.get(name, {}).get("from_files", []))
+        if old_from - have and keep_earlier(name, "a download it was cut from is gone"):
+            continue                  # cutting again would leave only part of the set
         if not pieces:
             out(f"  {s['artist']}: not in the downloads")
             continue
-        name = sanitize(f"{n:02} - " + s["artist"].replace('"', "'")) + ".mp3"
         dest = out_dir / name
+        tmp_dest = out_dir / (name[:-4] + ".partial.mp3")
         tags = ["-map_metadata", "-1", "-id3v2_version", "3",
                 "-metadata", f"artist={s['artist']}",
                 "-metadata", f"title={s['artist']} live, {s['stage']}",
@@ -1906,25 +2075,38 @@ def cut_festival(fest, dest_dir=None):
                 "-metadata", f"comment=Scheduled {s['start']}-{s['end']}, cut by the schedule "
                              f"and the DJs' log, so it may start or end a little off."]
         with tempfile.TemporaryDirectory() as tmp:
-            parts = []
+            parts, failed = [], ""
             for k, (x, y, p, w0) in enumerate(pieces):
                 part = Path(tmp) / f"{k}.mp3"
-                subprocess.run([ffmpeg, "-v", "error", "-ss", f"{(x - w0).total_seconds():.2f}",
-                                "-to", f"{(y - w0).total_seconds():.2f}", "-i", str(p), "-vn",
-                                "-c:a", "copy", "-map_metadata", "-1", "-y", str(part)],
-                               capture_output=True, creationflags=NOWIN)
+                rp = subprocess.run([ffmpeg, "-v", "error", "-ss", f"{(x - w0).total_seconds():.2f}",
+                                     "-to", f"{(y - w0).total_seconds():.2f}", "-i", str(p), "-vn",
+                                     "-c:a", "copy", "-map_metadata", "-1", "-y", str(part)],
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                    creationflags=NOWIN, timeout=1800)
+                if rp.returncode or not part.exists() or part.stat().st_size == 0:
+                    failed = (rp.stderr or "").strip()[:200] or "no sound came out"
+                    break
                 parts.append(part)
-            if len(parts) == 1:
-                src = ["-i", str(parts[0])]
-            else:
-                lst = Path(tmp) / "parts.txt"
-                lst.write_text("".join(f"file '{q.as_posix()}'\n" for q in parts), encoding="utf-8")
-                src = ["-f", "concat", "-safe", "0", "-i", str(lst)]
-            r = subprocess.run([ffmpeg, "-v", "error", *src, "-vn", "-c:a", "copy", *tags, "-y", str(dest)],
-                               capture_output=True, text=True, creationflags=NOWIN)
-        if r.returncode or not dest.exists():
-            out(f"  {name}: ffmpeg failed ({(r.stderr or '').strip()[:200]})")
+            if not failed:
+                if len(parts) == 1:
+                    src = ["-i", str(parts[0])]
+                else:
+                    # bare names, which ffmpeg finds beside the list: a full path breaks
+                    # on an apostrophe, as in a Windows user folder named O'Brien
+                    lst = Path(tmp) / "parts.txt"
+                    lst.write_text("".join(f"file '{q.name}'\n" for q in parts), encoding="utf-8")
+                    src = ["-f", "concat", "-safe", "0", "-i", str(lst)]
+                r = subprocess.run([ffmpeg, "-v", "error", *src, "-vn", "-c:a", "copy", *tags, "-y",
+                                    str(tmp_dest)], capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", creationflags=NOWIN, timeout=1800)
+                if r.returncode or not tmp_dest.exists() or tmp_dest.stat().st_size == 0:
+                    failed = (r.stderr or "").strip()[:200] or "no sound came out"
+        if failed:                    # the earlier cut, if any, stays as it was
+            tmp_dest.unlink(missing_ok=True)
+            if not keep_earlier(name, f"ffmpeg failed ({failed})"):
+                out(f"  {name}: ffmpeg failed ({failed})")
             continue
+        os.replace(tmp_dest, dest)
         written.add(name)
         length = sum((y - x).total_seconds() for x, y, *_ in pieces)
         index.append({"file": name, "artist": s["artist"], "stage": s["stage"], "day": s["day"],
@@ -1933,7 +2115,7 @@ def cut_festival(fest, dest_dir=None):
                       "seconds": int(length), "from_files": [p.name for _, _, p, _ in pieces]})
         out(f"  {name}  ({a:%a %I:%M %p} to {b:%I:%M %p}, {fmt_off(length)}"
             + (f", joined from {len(pieces)} files" if len(pieces) > 1 else "") + ")")
-    programs = cut_festival_programs(fest, files, windows, out_dir)
+    programs = cut_festival_programs(fest, files, windows, out_dir, earlier.get("programs", []))
     tmp_idx = out_dir / "festival.json.partial"
     tmp_idx.write_text(json.dumps(
         {"name": fest["name"], "short": fest.get("short"), "place": fest.get("place"),
@@ -1946,11 +2128,22 @@ def cut_festival(fest, dest_dir=None):
     return out_dir
 
 
-def cut_festival_programs(fest, files, windows, out_dir):
+def _festival_index(out_dir):
+    """A festival folder's festival.json from the last cut ({} if none or unreadable)."""
+    try:
+        return json.loads((Path(out_dir) / "festival.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def cut_festival_programs(fest, files, windows, out_dir, earlier=()):
     """The regular WWOZ shows that shared the festival broadcasts' slots (Jazz from Jax
     Brewery before the first set, Spirits of Congo Square after the last), cut out as
     whole shows with their own song lists, into the festival folder's 'WWOZ shows'
-    subfolder. The library files them with the other episodes of each show."""
+    subfolder. The library files them with the other episodes of each show. A show
+    that fails to cut, or whose download is gone, keeps its earlier cut (`earlier`:
+    the programs listed in the last festival.json)."""
+    earlier = {e["file"]: e for e in earlier}
     bounds = set_bounds(fest, files)
     prog_dir = out_dir / "WWOZ shows"
     prog_dir.mkdir(exist_ok=True)
@@ -1991,6 +2184,10 @@ def cut_festival_programs(fest, files, windows, out_dir):
             if r.returncode or not tmp.exists() or tmp.stat().st_size == 0:
                 tmp.unlink(missing_ok=True)
                 out(f"  WWOZ show {fname}: ffmpeg failed ({(r.stderr or '').strip()[:200]})")
+                old = earlier.get(f"WWOZ shows/{fname}")
+                if old and dest.exists():               # keep the earlier cut of it
+                    written.update({fname, tracklist_csv(dest).name, dest.stem + ".cue"})
+                    programs.append(old)
                 continue
             os.replace(tmp, dest)
             written.add(fname)
@@ -2000,6 +2197,12 @@ def cut_festival_programs(fest, files, windows, out_dir):
             programs.append({"file": f"WWOZ shows/{fname}", "name": name, "clock": x.isoformat(),
                              "seconds": o1 - o0, "songs": len(inside), "from_file": p.name})
             out(f"  WWOZ show: {name}  ({x:%a %I:%M %p} to {y:%I:%M %p}, {len(inside)} songs)")
+    have = {p.name for p in files}
+    for key, old in earlier.items():                  # shows whose download is gone stay
+        dest = out_dir / key
+        if old.get("from_file") not in have and dest.name not in written and dest.exists():
+            written.update({dest.name, tracklist_csv(dest).name, dest.stem + ".cue"})
+            programs.append(old)
     stale = sorted(before - written)
     if stale:
         recycle([prog_dir / n for n in stale])
@@ -2035,20 +2238,47 @@ def record_stream(hours, dest_dir: Path, stop_flag=None):
     end_at = time.time() + hours * 3600
     out(f"  recording live stream -> {dest.name} for {hours}h "
         f"(safe to keep using the PC; stop by closing/Ctrl+C)")
-    with open(dest, "wb") as f:
-        while time.time() < end_at and not (stop_flag and stop_flag.is_set()):
-            try:
-                with HTTP.get(STREAM_URL, headers=UA, stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    for chunk in r.iter_content(chunk_size=1 << 15):
-                        f.write(chunk)
-                        if time.time() >= end_at or (stop_flag and stop_flag.is_set()):
-                            break
-            except Exception as e:
-                out(f"  stream hiccup ({e}); reconnecting in 5s…")
-                time.sleep(5)
+    awake = _stay_awake()      # the file name's clock assumes the sound never stops
+    try:
+        with open(dest, "wb") as f:
+            while time.time() < end_at and not (stop_flag and stop_flag.is_set()):
+                try:
+                    with HTTP.get(STREAM_URL, headers=UA, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_content(chunk_size=1 << 15):
+                            try:
+                                f.write(chunk)
+                            except OSError as e:
+                                raise ToolError(f"the recording stopped: {dest.name} couldn't be written "
+                                                f"({e.strerror or e}). Is the disk full?")
+                            if time.time() >= end_at or (stop_flag and stop_flag.is_set()):
+                                break
+                except ToolError:
+                    raise
+                except Exception as e:
+                    out(f"  stream hiccup ({e}); reconnecting in 5s…")
+                    time.sleep(5)
+    finally:
+        awake()
     out(f"  done: {dest.name} ({dest.stat().st_size >> 20} MB)")
     return dest
+
+
+def _stay_awake():
+    """Keep the computer from going to sleep (the screen may still turn off) until the
+    returned function is called. Call both from the same thread."""
+    if os.name == "nt":
+        import ctypes
+        es = ctypes.windll.kernel32.SetThreadExecutionState
+        es(0x80000000 | 0x00000001)              # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        return lambda: es(0x80000000)
+    if sys.platform == "darwin":
+        try:
+            p = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
+            return lambda: (p.kill(), p.wait())
+        except OSError:
+            pass
+    return lambda: None
 
 
 def cmd_record(args):
@@ -2099,11 +2329,13 @@ def cmd_weekly(args):
                 fests[f["name"]] = f
         except Exception as e:
             out(f"    FAILED: {e}")
+            report_error("Sunday download")
     for f in fests.values():                    # a festival broadcast among them: recut its sets
         try:
             cut_festival(f, dest_dir)
         except Exception as e:
             out(f"    cutting {f['name']} into sets failed: {e}")
+            report_error("festival cut")
     retry = sorted(dest_dir.glob("*.tracklist.failed"))
     if retry:
         out(f"Retrying the DJ song list for {len(retry)} earlier download(s):")
@@ -2225,8 +2457,10 @@ def main():
         args.fn(args)
     except ToolError as e:
         out(f"ERROR: {e}")
+        report_error(f"wwoz.py {args.cmd}", str(e))
         sys.exit(1)
     except Exception:
+        report_error(f"wwoz.py {args.cmd}")
         if not args.log:
             raise
         import traceback
