@@ -201,7 +201,7 @@ def fest_slug(name):
     return name.split("-", 3)[3][:-4]
 
 
-def festival_setup(name, settings, shows=None):
+def festival_setup(name, settings, shows=None, events=None):
     """Scratch folders, the made-up archive and a live broadcast calendar served from this
     machine (add entries to srv.calendar), a stand-in live stream, and the settings for a
     run (None: a new install with no settings file). Returns (root, server, env)."""
@@ -220,7 +220,7 @@ def festival_setup(name, settings, shows=None):
         os.link(tone, root / "server" / s["filename"])
     cal = []
     srv, url = fake_archive.serve(fake_archive.page(shows), root / "server",
-                                  live=lambda: fake_archive.live_page(cal), stream=tone)
+                                  live=lambda: fake_archive.live_page(cal), stream=tone, events=events)
     srv.calendar = cal
     env = dict(os.environ, WWOZ_DATA=str(root / "data"), WWOZ_RECORDINGS=str(root / "rec"),
                WWOZ_ARCHIVE_URL=url, WWOZ_LIVE_CALENDAR_URL=srv.live_url, WWOZ_STREAM_URL=srv.stream_url,
@@ -377,6 +377,48 @@ def festival_checks():
         srv.shutdown()
     except Exception:
         check("festival downloads", False, traceback.format_exc()[-600:])
+
+
+def sets_checks():
+    """Festivals cut into their sets: a set list read from a calendar entry, and a made-up
+    Festing in Place recording marked at the listed times (no set finder) and cut."""
+    import traceback
+    import fake_archive
+    try:
+        page = fake_archive.event_page(["11am-12:30pm Kermit Ruffins & the BBQ Swingers",
+                                        "12:30-2pm Shannon Powell (recorded last year)", "2pm Doreen Ketchens"])
+        root, srv, env = festival_setup("sets", {"auto_festivals": True, "auto_festivals_from": "2026-10-13",
+                                                 "favorites": []}, shows=[], events=lambda path: page)
+        tz = central_now().tzinfo
+        day = (central_now() + timedelta(days=9)).date()          # (not a Festing in Place day)
+        srv.calendar.append({"title": "Satchmo SummerFest 2026", "start": datetime(day.year, day.month, day.day, 11, tzinfo=tz),
+                             "end": datetime(day.year, day.month, day.day, 18, tzinfo=tz), "place": "Old U.S. Mint"})
+        subprocess.run([sys.executable, "wwoz.py", "festivals"], cwd=HERE, env=env, capture_output=True, text=True,
+                       timeout=300)
+        saved = json.loads((root / "data" / "festival_sets.json").read_text())["events"]
+        sets = next(iter(saved.values()), {}).get("sets", [])
+        check("festival sets: a calendar entry's list is read", [(s["start"], s["artist"]) for s in sets] == [
+            ("11:00", "Kermit Ruffins & the BBQ Swingers"), ("12:30", "Shannon Powell"), ("14:00", "Doreen Ketchens")], sets)
+        srv.shutdown()
+
+        rec = root / "rec" / "wwoz-live-2026-10-22-10h50m00s Festing in Place 2026.mp3"
+        ffmpeg = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+        subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono", "-t", "4800",
+                        "-b:a", "8k", "-y", str(rec)], check=True)
+        Path(str(rec.with_suffix("")) + ".show.json").write_text(json.dumps(
+            {"title": "Festing in Place 2026", "festival": "Festing in Place 2026", "recorded_live": True}))
+        r1 = subprocess.run([sys.executable, "wwoz.py", "broadcast-sets", str(rec)], cwd=HERE, env=env,
+                            capture_output=True, text=True, timeout=300)
+        r2 = subprocess.run([sys.executable, "wwoz.py", "split", str(rec)], cwd=HERE, env=env,
+                            capture_output=True, text=True, timeout=300)
+        idx = json.loads((rec.parent / (rec.stem + " - tracks") / "pieces.json").read_text()) \
+            if (rec.parent / (rec.stem + " - tracks") / "pieces.json").exists() else {}
+        names = [p["name"] for p in idx.get("pieces", []) if p["kind"] == "set"]
+        check("festival sets: a Festing in Place recording is marked and cut at the listed times",
+              names[:3] == ["Kermit Ruffins' Tribute to Louis Armstrong (Jazz Fest 2026)", "Amanda Shaw (FQ Fest 2026)",
+                            "James Rivers (Jazz Fest 1994)"], f"{names} {(r1.stdout + r1.stderr + r2.stderr)[-300:]}")
+    except Exception:
+        check("festival sets", False, traceback.format_exc()[-600:])
 
 
 def festival_gui_checks():
@@ -558,6 +600,7 @@ def program_checks():
     sleep_checks(wwoz, path)
     report_checks()
     festival_checks()
+    sets_checks()
     live_checks()
 
     junk = wwoz.RECORDINGS_DIR / f"trash-test-{int(time.time())}.txt"

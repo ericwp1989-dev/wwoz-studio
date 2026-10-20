@@ -65,10 +65,18 @@ def live_page(events):
             '<li><a href="/calendar/live-broadcast">Upcoming</a></li></ul>' + "\n".join(blocks) + "</body></html>")
 
 
-def serve(build, audio_dir, live=None, stream=None):
+def event_page(lines):
+    """A calendar entry's own page, its text (a broadcast list, say) one paragraph a line."""
+    body = "".join(f"<p>{html.escape(line)}</p>" for line in lines)
+    return ('<html><body><div class="field field-name-body field-type-text-with-summary field-label-hidden">'
+            f'<div class="field-items"><div class="field-item even">{body}</div></div></div></body></html>')
+
+
+def serve(build, audio_dir, live=None, stream=None, events=None):
     """Serve the archive page `build(audio_url)` makes, and the mp3s in audio_dir; with
     `live`, a live broadcast calendar (a function returning the page, so a test can change
-    it); with `stream`, an mp3 played as the live stream. Returns (server, the archive
+    it); with `stream`, an mp3 played as the live stream; with `events`, a function giving
+    an entry's page for its path ('/events/900000'), or None. Returns (server, the archive
     page's URL); server.requests lists the paths asked for, and the calendar is at
     server.live_url, the stream at server.stream_url."""
     audio_dir = Path(audio_dir)
@@ -76,8 +84,10 @@ def serve(build, audio_dir, live=None, stream=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             srv.requests.append(self.path)
-            if self.path.startswith("/calendar/live-broadcast") and live:
-                body = live().encode("utf-8")
+            page = (live() if self.path.startswith("/calendar/live-broadcast") and live else
+                    events(self.path) if self.path.startswith("/events/") and events else None)
+            if page is not None:
+                body = page.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))

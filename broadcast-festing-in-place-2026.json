@@ -1,0 +1,380 @@
+{
+ "_help": [
+  "What WWOZ broadcasts on a festival day, set by set, for festivals it posts only as a",
+  "picture (its Live Event Broadcasts calendar carries no text schedule for them). The",
+  "app uses it to name and cut its recordings of the broadcast: with the set finder it",
+  "places each cut where the DJs introduce the set, without it at the time given here.",
+  "Times are Central, 24-hour. 'from' is where and when the set was recorded."
+ ],
+ "title": "Festing in Place 2026",
+ "source": "WWOZ's schedule cubes-festing-2026-10-14.pdf on its Live Event Broadcasts calendar (read 2026-10-20). Only each day's last start is printed; the others are measured from the grid, which says all times are approximate.",
+ "days": {
+  "2026-10-22": [
+   {
+    "start": "11:00",
+    "end": "11:32",
+    "artist": "Kermit Ruffins' Tribute to Louis Armstrong",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "11:32",
+    "end": "12:00",
+    "artist": "Amanda Shaw",
+    "from": "FQ Fest 2026"
+   },
+   {
+    "start": "12:00",
+    "end": "12:29",
+    "artist": "James Rivers",
+    "from": "Jazz Fest 1994"
+   },
+   {
+    "start": "12:29",
+    "end": "12:58",
+    "artist": "Kenny Neal",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "12:58",
+    "end": "13:26",
+    "artist": "Cyril Neville & Tribe 13",
+    "from": "Jazz Fest 2010"
+   },
+   {
+    "start": "13:26",
+    "end": "13:55",
+    "artist": "Charlie Sexton",
+    "from": "Tipitina's 1983"
+   },
+   {
+    "start": "13:55",
+    "end": "14:26",
+    "artist": "Original Pinettes Brass Band",
+    "from": "Treme Creole Gumbo Fest 2025"
+   },
+   {
+    "start": "14:26",
+    "end": "14:55",
+    "artist": "Zachary Richard",
+    "from": "Tipitina's 1980s"
+   },
+   {
+    "start": "14:55",
+    "end": "15:24",
+    "artist": "Cedric Burnside",
+    "from": "WWOZ 2026"
+   },
+   {
+    "start": "15:24",
+    "end": "15:56",
+    "artist": "Jeremy Lyons & Members of Morphine",
+    "from": "Jazz Fest 2012"
+   },
+   {
+    "start": "15:56",
+    "end": "16:24",
+    "artist": "Robin Barnes",
+    "from": "WWOZ 2026"
+   },
+   {
+    "start": "16:24",
+    "end": "16:53",
+    "artist": "Placide Adams",
+    "from": "Congo Square 1983"
+   },
+   {
+    "start": "16:53",
+    "end": "17:21",
+    "artist": "Quiana Lynell",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "17:21",
+    "end": "17:50",
+    "artist": "Corey Ledet Zydeco & Black Magic",
+    "from": "FQ Fest 2026"
+   },
+   {
+    "start": "17:50",
+    "end": "19:00",
+    "artist": "Allen Toussaint",
+    "from": "Jazz Fest 2005"
+   }
+  ],
+  "2026-10-23": [
+   {
+    "start": "11:00",
+    "end": "11:31",
+    "artist": "Preservation Hall Jazz Band",
+    "from": "Jazz Fest 2015"
+   },
+   {
+    "start": "11:31",
+    "end": "12:03",
+    "artist": "Bruce 'Sunpie' Barnes",
+    "from": "BlackAmericana Fest 2025"
+   },
+   {
+    "start": "12:03",
+    "end": "12:30",
+    "artist": "Mia Borders",
+    "from": "Blues & BBQ Fest 2025"
+   },
+   {
+    "start": "12:30",
+    "end": "13:02",
+    "artist": "Mahmoud Chouki Cigar Box Project",
+    "from": "WWOZ 2026"
+   },
+   {
+    "start": "13:02",
+    "end": "13:30",
+    "artist": "Alvin Batiste",
+    "from": "Snug Harbor 1994"
+   },
+   {
+    "start": "13:30",
+    "end": "14:01",
+    "artist": "Tommy Malone & the Mystik Drone",
+    "from": "Jazz Fest 2011"
+   },
+   {
+    "start": "14:01",
+    "end": "14:29",
+    "artist": "Rebirth Brass Band",
+    "from": "FQ Fest 2026"
+   },
+   {
+    "start": "14:29",
+    "end": "15:01",
+    "artist": "Topsy Chapman & Solid Harmony",
+    "from": "Jazz Fest 2015"
+   },
+   {
+    "start": "15:01",
+    "end": "15:28",
+    "artist": "Earl Turbinton",
+    "from": "CAC 1982"
+   },
+   {
+    "start": "15:28",
+    "end": "15:57",
+    "artist": "R.L. Burnside",
+    "from": "Jazz Fest 1998"
+   },
+   {
+    "start": "15:57",
+    "end": "16:25",
+    "artist": "Terrance Simien",
+    "from": "Jazz Fest 2011"
+   },
+   {
+    "start": "16:25",
+    "end": "16:56",
+    "artist": "Piano Night 1995 sets by Ivan Neville, Tommy Ridgley & Ed Volker"
+   },
+   {
+    "start": "16:56",
+    "end": "17:24",
+    "artist": "New Orleans Jazz Vipers",
+    "from": "Jazz Fest 2024"
+   },
+   {
+    "start": "17:24",
+    "end": "17:55",
+    "artist": "Walter Wolfman Washington",
+    "from": "Jazz Fest 2019"
+   },
+   {
+    "start": "17:55",
+    "end": "19:00",
+    "artist": "Irma Thomas & the Professionals",
+    "from": "Blues & BBQ Fest 2024"
+   }
+  ],
+  "2026-10-24": [
+   {
+    "start": "11:00",
+    "end": "11:31",
+    "artist": "Big Sam's Funky Nation",
+    "from": "Congo Square Rhythms Fest 2026"
+   },
+   {
+    "start": "11:31",
+    "end": "11:59",
+    "artist": "John Boutte",
+    "from": "Jazz Fest 2008"
+   },
+   {
+    "start": "11:59",
+    "end": "12:30",
+    "artist": "Nikki Hill",
+    "from": "BlackAmericana Fest 2025"
+   },
+   {
+    "start": "12:30",
+    "end": "13:01",
+    "artist": "Michael Ray & the Cosmic Krewe ft Trey Anastasio & Jon Fishman",
+    "from": "Jazz Fest 1995"
+   },
+   {
+    "start": "13:01",
+    "end": "13:32",
+    "artist": "Wendell Brunious",
+    "from": "Jazz & Heritage Center 2023"
+   },
+   {
+    "start": "13:32",
+    "end": "13:59",
+    "artist": "Little Feat",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "13:59",
+    "end": "14:28",
+    "artist": "Hot 8 Brass Band",
+    "from": "Treme Creole Gumbo Fest 2023"
+   },
+   {
+    "start": "14:28",
+    "end": "14:56",
+    "artist": "Queen Ida",
+    "from": "Tipitina's 1983"
+   },
+   {
+    "start": "14:56",
+    "end": "15:23",
+    "artist": "Glen David Andrews",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "15:23",
+    "end": "15:50",
+    "artist": "Kelly Love Jones",
+    "from": "FQ Fest 2026"
+   },
+   {
+    "start": "15:50",
+    "end": "16:20",
+    "artist": "Clarence Gatemouth Brown",
+    "from": "Tipitina's 1988"
+   },
+   {
+    "start": "16:20",
+    "end": "16:47",
+    "artist": "Ruthie Foster",
+    "from": "Blues & BBQ Fest 2022"
+   },
+   {
+    "start": "16:47",
+    "end": "17:15",
+    "artist": "Tyron Benoit",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "17:15",
+    "end": "17:45",
+    "artist": "Marcia Ball",
+    "from": "Piano Night 2005"
+   },
+   {
+    "start": "17:45",
+    "end": "19:00",
+    "artist": "Dr John",
+    "from": "Jazz Fest 2000"
+   }
+  ],
+  "2026-10-25": [
+   {
+    "start": "11:00",
+    "end": "11:30",
+    "artist": "The Gospel Soul of Irma Thomas",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "11:30",
+    "end": "11:58",
+    "artist": "Charlie Halloran",
+    "from": "WWOZ 2025"
+   },
+   {
+    "start": "11:58",
+    "end": "12:25",
+    "artist": "Tribute to Dolly Parton",
+    "from": "WWOZ 2026"
+   },
+   {
+    "start": "12:25",
+    "end": "12:53",
+    "artist": "Gregg Allman",
+    "from": "Jazz Fest 2011"
+   },
+   {
+    "start": "12:53",
+    "end": "13:20",
+    "artist": "Sally Baby's Silver Dollars",
+    "from": "WWOZ 2026"
+   },
+   {
+    "start": "13:20",
+    "end": "13:47",
+    "artist": "Barbara Shorts",
+    "from": "WWOZ 2023"
+   },
+   {
+    "start": "13:47",
+    "end": "14:15",
+    "artist": "James Andrews",
+    "from": "Jazz Fest 2006"
+   },
+   {
+    "start": "14:15",
+    "end": "14:42",
+    "artist": "Judith Owen",
+    "from": "Jazz Fest 2026"
+   },
+   {
+    "start": "14:42",
+    "end": "15:10",
+    "artist": "Henry Butler",
+    "from": "Piano Night 1996"
+   },
+   {
+    "start": "15:10",
+    "end": "15:37",
+    "artist": "Catherine Russell",
+    "from": "Jazz Fest 2023"
+   },
+   {
+    "start": "15:37",
+    "end": "16:04",
+    "artist": "River Eckert",
+    "from": "WWOZ 2026"
+   },
+   {
+    "start": "16:04",
+    "end": "16:35",
+    "artist": "Detroit Brooks' Danny Barker Tribute Band",
+    "from": "Snug Harbor 2020"
+   },
+   {
+    "start": "16:35",
+    "end": "17:02",
+    "artist": "Mighty Sam McClain",
+    "from": "Tipitina's 1983"
+   },
+   {
+    "start": "17:02",
+    "end": "17:30",
+    "artist": "Lady BJ + Ellis Marsalis",
+    "from": "Storyville 1988"
+   },
+   {
+    "start": "17:30",
+    "end": "19:00",
+    "artist": "Neville Brothers",
+    "from": "Jazz Fest 2001"
+   }
+  ]
+ }
+}

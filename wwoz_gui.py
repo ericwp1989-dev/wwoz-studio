@@ -388,6 +388,8 @@ class App(tk.Tk):
         self._seen_groups = set()
         self._loaded_keys = set()   # tracklist rows on disk when the open file was loaded
         self.guide_data = wwoz.load_fest_schedule()     # Jazz Fest days, needed by the library
+        import importlib.util                           # the set finder's packages (requirements-sets.txt)
+        self._set_finder = all(importlib.util.find_spec(m) for m in ("faster_whisper", "silero_vad", "numpy"))
         wwoz.out = self.logln  # all toolkit output -> Activity pane
 
         # background work (see _next_job): one job at a time, Shazam only while nothing plays
@@ -1275,10 +1277,19 @@ class App(tk.Tk):
         self._index_festivals(arch)
         items = {}
         fest_days = set(getattr(self, "guide_data", None) or {})
-        jf_year = min(fest_days)[:4] if fest_days else ""
+        self._guide()
+        other_days = {d: [t for t, _, _ in hs if not t.startswith("Jazz Fest")] for d, hs in self._days_cache.items()}
+
+        def festival_of(parent, day):
+            """The festival a set cut from a recording belongs to: the one recorded live,
+            else Jazz Fest's (its official schedule) or another festival WWOZ listed that day."""
+            live = self._live_info(parent)
+            name = (live["festival"] if live else f"Jazz Fest {day[:4]}" if day in fest_days
+                    else other_days[day][0] if other_days.get(day) else "")
+            return (name if not name or day[:4] in name else f"{name} {day[:4]}"), bool(live)
 
         # pieces cut from your own recordings
-        jf_recordings = set()
+        jf_recordings = {}                     # recording -> the Jazz Fest year its sets are from
         for folder in sorted(RECORDINGS_DIR.glob("* - tracks")):
             idx = wwoz.pieces_index(folder)
             if not idx:
@@ -1292,14 +1303,18 @@ class App(tk.Tk):
                 day = f"{clock:%Y-%m-%d}" if clock else ""
                 base = {"name": pc["name"], "clock": clock, "label": pc.get("label", ""),
                         "stage": pc.get("stage", ""), "seconds": pc.get("seconds", 0), "recording": parent}
-                if pc["kind"] == "set" and day in fest_days:
-                    jf_recordings.add(parent)
-                    items[p] = dict(base, kind="set", section="::fest", fest=f"Jazz Fest {jf_year}", day=day)
+                fest, live = festival_of(parent, day) if day else ("", False)
+                if pc["kind"] == "set" and fest:
+                    if fest.startswith("Jazz Fest") and not live:
+                        jf_recordings[parent] = day[:4]
+                        section = f"::fest:{day[:4]}"
+                    else:
+                        section = f"::lf:{wwoz.loose(fest)}"
+                    items[p] = dict(base, kind="set", section=section, fest=fest, day=day)
                 elif pc["kind"] == "program":
                     items[p] = dict(base, kind="episode", section="::shows", source="recording")
                 else:
-                    items[p] = dict(base, kind="between", section=None,
-                                    fest=f"Jazz Fest {jf_year}" if day in fest_days else "")
+                    items[p] = dict(base, kind="between", section=None, fest=fest)
         # the same set caught by two overlapping recordings: keep the longer copy
         sets = sorted((p for p, it in items.items() if it["kind"] == "set"),
                       key=lambda p: (items[p]["day"], wwoz.loose(items[p]["name"]), -items[p]["seconds"]))
@@ -1349,7 +1364,7 @@ class App(tk.Tk):
             start = wwoz.start_time_from_name(p)
             live = self._live_info(p)          # a festival recorded as it aired (wwoz.record_festival)
             items[p] = {"kind": "full", "section": "::full",
-                        "sub": (f"Jazz Fest {jf_year} days" if p in jf_recordings else
+                        "sub": (f"Jazz Fest {jf_recordings[p]} days" if p in jf_recordings else
                                 f"{live['festival']}, recorded live" if live else "Other recordings"),
                         "name": p.stem, "clock": start, "live": live}
 
@@ -1401,10 +1416,11 @@ class App(tk.Tk):
                     "about": (f"WWOZ's live broadcast from the {it['place']}, whole, as the archive keeps "
                               "it. WWOZ Studio has no set times for this festival, so it isn't cut into "
                               "sets; the song list shows any records the DJs logged.")}
-        if it["kind"] == "set":                                     # Jazz Fest, from your recording
+        if it["kind"] == "set":                         # a festival set, from your recording
             how = self._how_named(it["label"])
+            stage = it["stage"] if it["stage"] != wwoz.BROADCAST_STAGE else ""
             return {"title": it["name"],
-                    "subtitle": (f"{when:%A, %B} {when.day}" + (f" at the {it['stage']}" if it["stage"] else "")
+                    "subtitle": (f"{when:%A, %B} {when.day}" + (f" at the {stage}" if stage else "")
                                  + f", from {clock(when)}") if when else "",
                     "about": f"{it['fest']}, from your recording of WWOZ's broadcast. {how}"}
         if it["kind"] == "episode":
@@ -1474,7 +1490,8 @@ class App(tk.Tk):
         if "unlabeled" in label:
             return "Nobody named this performance on the air."
         if label.startswith("set @"):
-            return "Placed at its scheduled time."
+            return ("Placed at its time on WWOZ's broadcast list, so it may start or end a little off."
+                    if label == f"set @ {wwoz.BROADCAST_STAGE}" else "Placed at its scheduled time.")
         if label == "manual marker":
             return "Named by you."
         return ""
@@ -1553,17 +1570,26 @@ class App(tk.Tk):
                 for p, it in todays:
                     leaf(f"{gid}:{day}", p, it, ("set",))
 
-        # festivals: Jazz Fest first (your own recordings), then the broadcast ones, newest
-        # first: those cut into sets, and those with no set times, whole broadcasts by day
-        jf = [(p, it) for p, it in items.items() if it["section"] == "::fest"]
-        if jf:
-            festival("::fest", jf[0][1]["fest"], jf, default_open=False)
-        aired = [(min(fest["days"]), f"::bf:{fest['name']}", fest.get("short") or fest["name"], "set")
+        # festivals: Jazz Fest first (your own recordings, newest year first), then the
+        # broadcast ones, newest first: recorded as they aired and cut into sets, downloaded
+        # from the archive and cut into sets, and those with no set times, whole by day
+        jf, recorded = {}, {}
+        for p, it in items.items():
+            sec = it.get("section") or ""
+            if sec.startswith("::fest:"):
+                jf.setdefault(sec, []).append((p, it))
+            elif sec.startswith("::lf:"):
+                recorded.setdefault(sec, []).append((p, it))
+        for gid in sorted(jf, reverse=True):
+            festival(gid, jf[gid][0][1]["fest"], jf[gid], default_open=False)
+        aired = [(min(fest["days"]), f"::bf:{fest['name']}", fest.get("short") or fest["name"], "set", True)
                  for fest, *_ in self._fests]
-        aired += [(first, gid, title, "broadcast") for gid, title, first in self._auto_fests]
-        for _, gid, title, noun in sorted(aired, reverse=True):
+        aired += [(first, gid, title, "broadcast", True) for gid, title, first in self._auto_fests]
+        aired += [(min(it["day"] for _, it in sets), gid, sets[0][1]["fest"], "set", False)
+                  for gid, sets in recorded.items()]
+        for _, gid, title, noun, days_open in sorted(aired, reverse=True):
             festival(gid, title, [(p, it) for p, it in items.items() if it["section"] == gid],
-                     default_open=True, noun=noun)
+                     default_open=days_open, noun=noun)
 
         # the WWOZ shows, by show
         eps = [(p, it) for p, it in items.items() if it["section"] == "::shows" and hit(p, it)]
@@ -2326,11 +2352,11 @@ class App(tk.Tk):
     #   7. downloads get their Shazam scan, only while nothing is playing.
 
     def _is_fest_day(self, p):
-        """Does a recording cover at least 20 minutes of a Jazz Fest broadcast day? Only
-        recordings whose name carries the time count (or ones already scanned), so a
-        renamed file with a guessed start is never scanned by mistake."""
-        if not self.guide_data:
-            return False
+        """Does a recording cover at least 20 minutes of a festival broadcast that can be
+        cut into sets: a day of Jazz Fest's schedule, or one WWOZ listed set by set (see
+        wwoz.festival_guide)? Only recordings whose name carries the time count (or ones
+        already scanned), so a renamed file with a guessed start is never scanned by
+        mistake."""
         st = wwoz.start_time_from_name(p)
         if st is None:
             return Path(str(p.with_suffix("")) + ".autocut.json").exists()
@@ -2338,13 +2364,31 @@ class App(tk.Tk):
             end = st + timedelta(seconds=wwoz.ffprobe_duration(p))
         except Exception:
             return False
-        for d in self.guide_data:
-            y, mo, dd = map(int, d.split("-"))
-            a = max(st, datetime(y, mo, dd, 10, 45, tzinfo=wwoz.TZ))
-            b = min(end, datetime(y, mo, dd, 19, 0, tzinfo=wwoz.TZ))
-            if (b - a).total_seconds() >= 1200:
+        guide = self._guide()
+        for _, a, b in self._festival_hours(st, end):
+            if f"{a:%Y-%m-%d}" in guide and (min(b, end) - max(a, st)).total_seconds() >= 1200:
                 return True
         return False
+
+    def _guide(self):
+        """wwoz.festival_guide(), read again at most once a minute (it is asked often)."""
+        if time.time() - getattr(self, "_guide_at", 0) > 60:
+            self._guide_cache, self._days_cache, self._guide_at = wwoz.festival_guide(), wwoz.festival_days(), time.time()
+        return self._guide_cache
+
+    def _festival_hours(self, start, end):
+        self._guide()
+        days = {f"{start + timedelta(days=k):%Y-%m-%d}" for k in range(-1, (end - start).days + 2)}
+        return [h for d in days for h in self._days_cache.get(d, []) if h[1] < end and h[2] > start]
+
+    def _has_broadcast_list(self, p):
+        """Is there a broadcast list (WWOZ's sets, not only Jazz Fest's stages) for a recording?"""
+        st = wwoz.start_time_from_name(p)
+        if st is None:
+            return False
+        guide = self._guide()
+        return any(s.get("on_air") for d in (f"{st:%Y-%m-%d}", f"{st + timedelta(hours=12):%Y-%m-%d}")
+                   for s in guide.get(d, []))
 
     def _next_job(self):
         """The next piece of background work: (what the status line says, function, key),
@@ -2366,9 +2410,17 @@ class App(tk.Tk):
             if not tl.exists() and due(key):
                 return (f"getting the DJs' song list for {name}", lambda p=p: wwoz.fetch_tracklist_or_mark(p), key)
             key = (str(p), "autocut")
-            if (key not in self._job_done and p != self.current_file
-                    and not Path(str(p.with_suffix("")) + ".autocut.json").exists() and self._is_fest_day(p)):
+            scanned = Path(str(p.with_suffix("")) + ".autocut.json").exists()
+            if (self._set_finder and key not in self._job_done and p != self.current_file
+                    and not scanned and self._is_fest_day(p)):
                 return (f"finding the sets in {name} (20 to 40 minutes)", lambda p=p: self._run_autocut(p), key)
+            # no set finder here (or it couldn't run): WWOZ's broadcast list places the sets
+            key2 = (str(p), "broadcast-sets")
+            if (key2 not in self._job_done and not scanned and (not self._set_finder or key in self._job_done)
+                    and tl.exists() and self._has_broadcast_list(p)
+                    and not any(str(r.get("show", "")).startswith(("set @", "autocut")) for r in wwoz.read_tracklist(p))):
+                return (f"marking the sets in {name} from WWOZ's broadcast list",
+                        lambda p=p: wwoz.mark_broadcast_sets(p), key2)
             key = (str(p), "programs")
             if key not in self._job_done and tl.exists() and wwoz.unmarked_shows(p):
                 # songs from shows no marker starts: take the show changes from WWOZ's calendar

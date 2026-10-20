@@ -126,8 +126,10 @@ time, and the line under the song list says what it is doing:
 - A recording without a song list gets one from the DJs' log (Spinitron), and a
   recording of regular programming is marked where each show begins, from WWOZ's
   calendar.
-- A new recording of a Jazz Fest day is listened through for the DJs' announcements, and
-  each performance is named from their words (20 to 40 minutes per day, at low priority).
+- A new recording of a festival day is listened through for the DJs' announcements, and
+  each performance is named from their words and the festival's lists (20 to 40 minutes per
+  day, at low priority). Without the set finder installed, the sets are placed at the
+  listed times instead.
 - Every recording is cut into its sets and whole shows. After you fix a name by hand, it
   is cut again two minutes later, so a few quick fixes make one new cut.
 - It looks in WWOZ's archive once an hour and downloads any new festival broadcast, and
@@ -177,8 +179,8 @@ asleep is fine on Windows; a Mac has to be awake. If the computer comes on partw
 through a festival day, it records the rest. A recorded day is about 500 MB, so the eight
 days of Jazz Fest come to about 4 GB. The recording lands in your recordings folder, named
 for the festival, and the library lists it under Full recordings, under the festival's
-name; a Jazz Fest day is then cut into its sets as described under "The library", once the
-app has that year's Jazz Fest schedule.
+name; its sets get a section of their own (see "Every festival is cut into its sets"
+below).
 
 **Festivals WWOZ does keep, such as the Crescent City Blues & BBQ Fest, are downloaded
 from its archive**, which holds them for two weeks: the Sunday download gets every new
@@ -204,10 +206,37 @@ Each two-hour broadcast in the archive is about 115 MB. A three-day festival lik
 Blues & BBQ Fest comes to about 14 of them, close to 2 GB, and cutting it into sets makes
 copies that take about as much again.
 
-When the app has a festival's set times, its broadcasts are cut into one file per set, as
-described under "The library". For any other festival, the broadcasts stay whole: the
-library gives the festival its own section, day by day, with each broadcast named for the
-acts in it ("Marc Stone, Kenny Brown") and for any regular show that shared the slot.
+**Every festival is cut into its sets.** WWOZ usually lists what it airs on a festival
+day, set by set, in that day's entry on its calendar: "2-3:15pm Erica Falls & Vintage
+Soul" for the Blues & BBQ Fest, or "12:30pm Judith Owen & The Callers - recorded in the
+Economy Hall Tent on Thursday, April 30" for Jazz Fest. The app reads those lists along
+with the calendar, as long as the festival is still to come. Then:
+
+- A festival it records is cut by the set finder, the optional part Setup offers, which
+  listens for the DJs' introductions and cuts where each set is introduced, naming it from
+  the list (and from the festival's own schedule, for Jazz Fest). On a Jazz Fest day of
+  2026, with WWOZ's list beside the festival's schedule, it placed the same sets as before
+  and confirmed most of their names from both. Without the set finder, the app cuts at the
+  times on the list instead, moved past any record the DJs logged during a changeover.
+  WWOZ's own shows before and after the broadcast become pieces of their own.
+- A festival it downloads from the archive is cut by the list the same way as the Blues &
+  BBQ Fest is by its set times (cut from the 2026 broadcasts by WWOZ's list alone, it gives
+  the same 18 sets).
+- A replayed set is named for when it was recorded, as in "Judith Owen & The Callers
+  (recorded Apr 30)".
+
+Some schedules come only as a picture. Festing in Place 2026 (October 22 to 25: past
+festival sets from the Jazz & Heritage Foundation's archive) is one, so its 60 sets are
+typed into the program, from the grid WWOZ posted, in `broadcast-festing-in-place-2026.json`;
+each set's name says where it was recorded, as in "Allen Toussaint (Jazz Fest 2005)".
+Only each day's last start time is printed on the grid, so the others are measured from
+it, and WWOZ itself says all its times are approximate; the set finder corrects them from
+the DJs' introductions.
+
+A festival with no list at all, from WWOZ or typed in, isn't cut into sets: a recording
+stays whole, and archive downloads are listed under the festival day by day, each named
+for the acts in it ("Marc Stone, Kenny Brown") and for any regular show that shared the
+slot. The library gives every festival its own section, day by day.
 
 To turn all of this off, uncheck **Also get the festivals WWOZ broadcasts live, on their
 own** at the top of the Weekly Favorites page; that also removes the recording task or
@@ -252,7 +281,11 @@ schedules their recordings; `festival-record` records the one on the air now, wh
 what the computer's schedule runs. The calendar is saved in `live_broadcasts.json`, the
 recordings' log is `festival-recording.log`, and the schedule's definition is saved as
 `festival-recording-task.xml` (or `festival-recording.plist` on a Mac), all in
-Documents\WWOZ Studio.)
+Documents\WWOZ Studio. The festivals' set lists are saved in `festival_sets.json` there,
+and a festival in the archive cut by WWOZ's list gets a `fest-auto-*.json` beside it;
+`broadcast-*.json` beside the code holds a list typed in from a picture.
+`wwoz.py broadcast-sets FILE` marks a recording's sets at the listed times, and
+`wwoz.py autocut FILE` runs the set finder on it.)
 Errors the app runs into are written to `wwoz_studio_errors.log` in Documents\WWOZ Studio,
 and reported by `wwoz_report.py` (what a report holds and how to turn reports off are at
 the top of that file; `"send_error_reports": false` in favorites.json or

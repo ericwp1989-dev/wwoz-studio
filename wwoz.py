@@ -14,6 +14,7 @@ Commands:
   festival                  Mark and cut a broadcast festival's downloads into one file per set
   festivals                 The festival broadcasts WWOZ has announced, and when they are recorded
   festival-record           Record the festival on the air now (the computer's schedule runs it)
+  broadcast-sets FILE       Mark a festival recording's sets at the times on WWOZ's list
   record                    Record the live stream
   weekly                    Download all new episodes of your favorite shows (favorites.json),
                             and every new broadcast of a festival WWOZ carries live
@@ -930,7 +931,11 @@ def spinitron_events(start, end, include_unlogged=False):
 def is_placeholder_spin(spin):
     """During festival broadcasts the DJs log a stand-in entry ('WWOZ Live Broadcast /
     2026 Jazz & Heritage Festival LIVE Broadcast') rather than songs. It is not a
-    song, and as a split point it chopped performances in two."""
+    song, and as a split point it chopped performances in two. The app's own set markers
+    never are, though a name says "Jazz Fest" ("Little Feat (Jazz Fest 2026)")."""
+    show = str(spin.get("show") or "")
+    if show.startswith("set @") or (show.startswith("autocut") and "unlabeled" not in show):
+        return False
     text = " ".join(str(spin.get(k) or "") for k in ("artist", "song", "release")).lower()
     return ("live broadcast" in text or "jazzfest" in text.replace(" ", "")
             or bool(re.search(r"jazz (and|&) heritage festival", text)))
@@ -1553,6 +1558,7 @@ def split_pieces(path, lead_in=15, out_dir=None):
     total = ffprobe_duration(path)
     start = recording_start(path, total)
     fest = festival_for(path)
+    live = live_festival(path)                 # a festival recorded as it aired
     out_dir = Path(out_dir) if out_dir else path.parent / (path.stem + " - tracks")
     out_dir.mkdir(parents=True, exist_ok=True)
     before = {p.name for p in out_dir.iterdir() if SPLIT_NAME.match(p.name) or PIECE_SIDECAR.match(p.name)}
@@ -1614,6 +1620,7 @@ def split_pieces(path, lead_in=15, out_dir=None):
         day = (start + timedelta(seconds=t0)) if start else None     # when the piece's file begins
         if s["kind"] == "set":
             album = (f"{fest['name']} (WWOZ broadcast)" if fest else
+                     f"{live['festival']} (WWOZ broadcast)" if live else
                      f"Jazz Fest {day:%Y} (WWOZ broadcast)" if day else "Jazz Fest (WWOZ broadcast)")
             meta = [f"artist={s['name']}", f"title={s['name']} live" + (f", {stage}" if stage else ""),
                     f"album={album}"]
@@ -1799,22 +1806,10 @@ def add_program_markers(path: Path):
         start = datetime.fromtimestamp(path.stat().st_mtime, tz=TZ) - timedelta(seconds=duration)
     end = start + timedelta(seconds=duration)
 
-    # festival window to leave alone (set markers already live there)
-    fest = []
-    guide = load_fest_schedule()
-    if guide:
-        d = start
-        while d < end + timedelta(days=1):
-            day = d.strftime("%Y-%m-%d")
-            if day in guide:
-                y, mo, dd = map(int, day.split("-"))
-                # WWOZ stays on the festival until 7 PM even when the gates close early
-                # (it plays recordings from earlier sets), so that is the window
-                last = max([s["end"] for s in guide[day]] + ["19:00"])
-                h, m = map(int, last.split(":"))
-                fest.append((datetime(y, mo, dd, 10, 45, tzinfo=TZ),
-                             datetime(y, mo, dd, h, m, tzinfo=TZ)))
-            d += timedelta(days=1)
+    # festival broadcasts to leave alone (set markers live there): every festival day
+    # WWOZ listed, and Jazz Fest's, whose broadcast runs until 7 PM even when the gates
+    # close early (it plays recordings from earlier sets)
+    fest = [(a - timedelta(minutes=15), b) for _, a, b in festival_hours(start, end)]
 
     def in_fest(t):
         return any(a - timedelta(minutes=30) <= t < b - timedelta(minutes=1)
@@ -1919,9 +1914,11 @@ def broadcast_parts(title):
 
 
 def load_broadcast_festivals():
-    """Every festival with a fest-*.json beside the code."""
+    """Every festival with a schedule to cut its archive downloads by: a fest-*.json beside
+    the code, or one written from WWOZ's broadcast list (fest-auto-*.json in the data
+    folder; see update_auto_festivals)."""
     fests = []
-    for p in sorted(SCRIPT_DIR.glob("fest-*.json")):
+    for p in sorted(SCRIPT_DIR.glob("fest-*.json")) + sorted(DATA_DIR.glob("fest-auto-*.json")):
         try:
             fests.append(json.loads(p.read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
@@ -2398,6 +2395,10 @@ def download_festival_show(show, dest_dir):
         except (OSError, ValueError):
             pass
     remember_festival_download(show)
+    try:
+        update_auto_festivals(dest_dir)        # cut into sets by WWOZ's list, if there is one
+    except Exception as e:
+        out(f"    couldn't write its cutting schedule ({e})")
     return dest
 
 
@@ -2477,7 +2478,7 @@ def parse_live_calendar(page):
         place = re.search(r'node-organization.*?<h2>\s*<a href="[^"]*">([^<]+)</a>', blk, re.S)
         events.append({"title": html.unescape(title.group(2)).strip(), "start": start, "end": end,
                        "place": html.unescape(place.group(1)).strip() if place else "",
-                       "url": WWOZ + title.group(1)})
+                       "url": urljoin(LIVE_CALENDAR_URL, title.group(1))})
     return events
 
 
@@ -2548,6 +2549,11 @@ def festival_calendar(refresh=False, max_age=timedelta(hours=6)):
             write_text_atomic(LIVE_CALENDAR_PATH, json.dumps(saved, indent=1, ensure_ascii=False))
         except Exception as e:
             out(f"  couldn't read WWOZ's live broadcast calendar ({e}); the saved copy is used")
+        else:
+            try:
+                refresh_set_lists([e for e in events if is_festival_broadcast(e)])
+            except Exception as e:
+                out(f"  couldn't read the festivals' set lists ({e})")
     return saved_festival_calendar()
 
 
@@ -2844,6 +2850,328 @@ def cmd_festivals(args):
         out("Festivals are turned off on the Weekly Favorites page, so none of these is recorded.")
 
 
+# ------------------------------------------------- festival set lists ---
+# Every festival is cut into its sets, by what WWOZ says it airs set by set. Its Live
+# Event Broadcasts calendar usually lists that in the day's entry ("11:10am Preservation
+# Brass (recorded first Saturday in the Economy Hall Tent)" for Jazz Fest 2026, "2-3:15pm
+# Erica Falls & Vintage Soul" for the Blues & BBQ Fest); those lists are read as the
+# calendar is (refresh_set_lists) and kept in festival_sets.json. A festival posted only
+# as a picture (Festing in Place's grid) gets a broadcast-*.json beside the code, typed
+# from the picture. With a list:
+#   - a recording of the broadcast (live, or the app's own Record) is cut by the set
+#     finder, which places each cut where the DJs introduce the set, using the list as
+#     the schedule of what is on the air (festival_guide); without the set finder, at
+#     the listed times, moved past any record the DJs logged in a changeover
+#     (mark_broadcast_sets);
+#   - a festival the archive keeps is cut from its downloads like the Blues & BBQ Fest,
+#     with a schedule written from the list (update_auto_festivals: fest-auto-*.json in
+#     the data folder; a hand-made fest-*.json beside the code comes first).
+# Without any list, the set finder still splits a recording where the DJs talk between
+# sets and names what it hears them announce.
+
+SET_LISTS_PATH = DATA_DIR / "festival_sets.json"
+BROADCAST_STAGE = "WWOZ broadcast"     # a listed set whose stage the list doesn't give
+_MONTHS = "january february march april may june july august september october november december".split()
+_DAY_HEAD = re.compile(r"^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+(" + "|".join(_MONTHS)
+                       + r")\s+(\d{1,2})\b", re.I)
+_AMPM = r"([ap])\.?\s?m\.?"
+_SET_RANGE = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(?:" + _AMPM + r")?\s*(?:-|–|—|to)\s*(\d{1,2})(?::(\d{2}))?\s*"
+                        + _AMPM + r"\s*[:.,-]?\s+(.+)$", re.I)
+_SET_START = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*" + _AMPM + r"\s*[:.,-]?\s+(.+)$", re.I)
+_STAGE_AT_END = re.compile(r"\s+(?:from|at|on) the ((?:[\w.&'-]+ ){0,4}(?:Tent|Stage|Hall|Square))\s*$", re.I)
+
+
+def _minute(h, m, ap):
+    h, m = int(h) % 12, int(m or 0)
+    return (h + (12 if (ap or "").lower() == "p" else 0)) * 60 + m
+
+
+def parse_set_lines(text, day=None, until=None):
+    """The sets in the text of a WWOZ calendar entry, for `day` ('YYYY-MM-DD'; all of
+    them when the text has no day headings): [{'start', 'end', 'artist', 'stage',
+    'note'}], 24-hour times. A list of starts only ('11:10am Preservation Brass') ends
+    each set where the next begins, the last at `until` ('HH:MM')."""
+    year = int(day[:4]) if day else datetime.now(TZ).year
+    sets, current, stage = [], None, ""
+    for line in text.splitlines():
+        line = re.sub(r"\s+", " ", line.replace(" ", " ")).strip(" *•")
+        head = _DAY_HEAD.match(line)
+        if head:
+            current = f"{year}-{_MONTHS.index(head.group(1).lower()) + 1:02}-{int(head.group(2)):02}"
+            stage = ""
+            continue
+        if day and current and current != day:
+            continue
+        m = _SET_RANGE.match(line)
+        if m:
+            h0, m0, a0, h1, m1, a1, rest = m.groups()
+            end = _minute(h1, m1, a1)
+            begin = _minute(h0, m0, a0 or a1)
+            if not a0 and begin > end:                   # "11-12:15pm": the 11 is morning
+                begin = _minute(h0, m0, "a")
+        else:
+            m = _SET_START.match(line)
+            if not m:
+                if re.search(r"\b(stage|tent|hall)$", line, re.I) and len(line) < 50:
+                    stage = line                         # a heading: the stage the sets below are on
+                continue
+            h0, m0, a0, rest = m.groups()
+            begin, end = _minute(h0, m0, a0), None
+        note, set_stage = "", ""
+        rec = re.search(r"\s+[-–—]\s+(recorded\b.*)$", rest, re.I)     # "- recorded at the Gospel Tent on …"
+        if rec:
+            note, rest = rec.group(1).strip(), rest[:rec.start()]
+        par = re.search(r"\s*\(([^)]*)\)\s*$", rest)                          # "(recorded first Saturday …)"
+        if par:
+            note, rest = par.group(1).strip(), rest[:par.start()]
+        live = re.search(r"\s+live (?:from|at) (?:the )?(.+)$", rest, re.I)     # "live from Economy Hall Tent"
+        at = _STAGE_AT_END.search(rest)                                        # "from the Blues Tent"
+        if live:
+            set_stage, rest = live.group(1).strip(), rest[:live.start()]
+        elif at:
+            set_stage, rest = at.group(1), rest[:at.start()]
+        if not set_stage and note:                     # where it was recorded
+            m = re.search(r"\b(?:at|in) (?:the )?((?:[\w.&'-]+ ){0,4}(?:Tent|Stage|Hall))\b", note, re.I)
+            set_stage = m.group(1) if m else ""
+        sets.append({"start": begin, "end": end, "artist": rest.strip(" -:,"),
+                     "stage": set_stage or stage, "note": note})
+    sets.sort(key=lambda s: s["start"])
+    stop = int(until[:2]) * 60 + int(until[3:5]) if until else None
+    out_sets = []
+    for k, s in enumerate(sets):
+        end = s["end"] or (sets[k + 1]["start"] if k + 1 < len(sets) else stop)
+        if not end or end <= s["start"] or not s["artist"]:
+            continue
+        out_sets.append(dict(s, start=f"{s['start'] // 60:02}:{s['start'] % 60:02}",
+                             end=f"{end // 60:02}:{end % 60:02}"))
+    return out_sets
+
+
+def fetch_set_list(ev):
+    """The sets a festival day's calendar entry lists (see parse_set_lines), or []."""
+    r = HTTP.get(ev["url"], headers=UA, timeout=60)
+    r.raise_for_status()
+    best = []
+    for body in re.findall(r'field-name-body.*?<div class="field-item even">(.*?)</div>\s*</div>\s*</div>',
+                           r.text, re.S):
+        text = html.unescape(re.sub(r"<[^>]+>", " ", re.sub(r"<br\s*/?>|</p>|</li>|</h\d>", "\n", body)))
+        sets = parse_set_lines(text, f"{ev['start']:%Y-%m-%d}", f"{ev['end']:%H:%M}")
+        if len(sets) > len(best):
+            best = sets
+    return best
+
+
+def _saved_set_lists():
+    try:
+        saved = json.loads(SET_LISTS_PATH.read_text(encoding="utf-8"))
+        return saved if isinstance(saved.get("events"), dict) else {"events": {}}
+    except (OSError, ValueError, AttributeError):
+        return {"events": {}}
+
+
+def refresh_set_lists(events, max_age=timedelta(hours=6)):
+    """Read the set list of each festival day on the calendar from now to three weeks on
+    (and any begun in the last day), at most every six hours: WWOZ changes them. Every
+    festival day seen is kept for four months, with its hours, list or not."""
+    saved, now = _saved_set_lists(), datetime.now(TZ)
+    for e in events:
+        rec = saved["events"].setdefault(e["url"], {})
+        rec.update(title=e["title"], day=f"{e['start']:%Y-%m-%d}", start=f"{e['start']:%H:%M}",
+                   end=f"{e['end']:%H:%M}", place=e.get("place", ""), url=e["url"])
+        try:
+            fresh = now - datetime.fromisoformat(rec["checked"]) < max_age
+        except (KeyError, ValueError, TypeError):
+            fresh = False
+        if fresh or not (now - timedelta(days=1) < e["end"] and e["start"] < now + timedelta(days=21)):
+            continue
+        try:
+            sets = fetch_set_list(e)
+        except Exception as ex:
+            out(f"  couldn't read the set list of {e['title']} ({ex})")
+            continue
+        rec["checked"] = now.isoformat()
+        if sets or not rec.get("sets"):
+            rec["sets"] = sets
+    gone = f"{now - timedelta(days=120):%Y-%m-%d}"
+    saved["events"] = {u: r for u, r in saved["events"].items() if r.get("day", "") >= gone}
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(SET_LISTS_PATH, json.dumps(saved, indent=1, ensure_ascii=False))
+    try:
+        update_auto_festivals()
+    except Exception as ex:
+        out(f"  couldn't write the cutting schedule of a festival in the archive ({ex})")
+
+
+def _clean_place(place):
+    return re.sub(r"\s*\((?:OUTDOORS|INDOORS)\)\s*$", "", place or "", flags=re.I).strip()
+
+
+def broadcast_schedule():
+    """{day: [set]}: what WWOZ broadcast (or will) on each festival day it listed set by
+    set, from its calendar (festival_sets.json), else from a broadcast-*.json beside the
+    code. Each set: start, end, artist, label (the name its file gets: the artist, and
+    where the set was recorded when the list says), stage, note, festival, on_air."""
+    by_day = {}
+    for p in sorted(SCRIPT_DIR.glob("broadcast-*.json")):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+            for day, sets in doc["days"].items():
+                by_day.setdefault(day, {})[doc["title"]] = sets
+        except (OSError, ValueError, KeyError, AttributeError) as e:
+            out(f"  (skipping {p.name}: {e})")
+    for rec in _saved_set_lists()["events"].values():
+        if rec.get("sets"):
+            by_day.setdefault(rec["day"], {})[rec["title"]] = [
+                dict(s, stage=s.get("stage") or _clean_place(rec.get("place"))) for s in rec["sets"]]
+    def label(s):
+        if s.get("from"):                              # Festing in Place: "(Jazz Fest 2026)"
+            return f"{s['artist']} ({s['from']})"
+        m = re.search(r"\brecorded\b.*?\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2})\b", s.get("note") or "", re.I)
+        return f"{s['artist']} (recorded {m.group(1)[:3].title()} {int(m.group(2))})" if m else s["artist"]
+    out_days = {}
+    for day, fests in by_day.items():
+        out_days[day] = sorted(
+            (dict(s, festival=title, on_air=True, stage=s.get("stage") or BROADCAST_STAGE, label=label(s))
+             for title, sets in fests.items() for s in sets), key=lambda s: s["start"])
+    return out_days
+
+
+def festival_guide():
+    """What the set finder names sets from: every act of Jazz Fest's official schedule
+    (jazzfest*_sets.json, all stages), and every festival day's broadcast list
+    (on_air: the sets WWOZ aired, which the set finder takes as the schedule of what
+    was on the air)."""
+    guide = {d: list(s) for d, s in load_fest_schedule().items()}
+    for day, sets in broadcast_schedule().items():
+        guide.setdefault(day, []).extend(sets)
+    return guide
+
+
+def festival_days():
+    """{day: [(festival, start, end)]}: every day WWOZ broadcast a festival (or will),
+    whether or not it listed the sets: from its calendar as saved, the broadcast-*.json
+    files, and Jazz Fest's official schedule (whose broadcast runs until 7 PM)."""
+    days = {}
+
+    def add(day, title, a, b):
+        if not any(t == title for t, _, _ in days.get(day, [])):
+            days.setdefault(day, []).append((title, _clock(day, a), _clock(day, b)))
+    for rec in _saved_set_lists()["events"].values():
+        add(rec["day"], rec["title"], rec["start"], rec["end"])
+    for e in saved_festival_calendar():
+        add(f"{e['start']:%Y-%m-%d}", e["title"], f"{e['start']:%H:%M}", f"{e['end']:%H:%M}")
+    for day, sets in broadcast_schedule().items():
+        add(day, sets[0]["festival"], min(s["start"] for s in sets), max(s["end"] for s in sets))
+    for day, sets in load_fest_schedule().items():
+        add(day, f"Jazz Fest {day[:4]}", "11:00", max([s["end"] for s in sets] + ["19:00"]))
+    return days
+
+
+def festival_hours(start, end):
+    """The festival broadcast windows a span of time overlaps: [(festival, a, b)]."""
+    hours, days = [], festival_days()
+    for day in {f"{start + timedelta(days=k):%Y-%m-%d}" for k in range(-1, (end - start).days + 2)}:
+        hours += [(t, a, b) for t, a, b in days.get(day, []) if a < end and b > start]
+    return sorted(hours, key=lambda h: h[1])
+
+
+def mark_broadcast_sets(path):
+    """Set markers in a festival recording's song list at the times on WWOZ's broadcast
+    list, for a computer without the set finder (or where it couldn't run): each set at
+    its listed start, moved past any record the DJs logged up to 20 minutes before it
+    (the changeover), but no more than six minutes late (see set_bounds). Earlier set
+    markers are replaced. Returns how many were placed."""
+    path = Path(path)
+    duration = ffprobe_duration(path)
+    start = recording_start(path, duration)
+    if not start:
+        return 0
+    end = start + timedelta(seconds=duration)
+    sets = sorted(((_clock(day, s["start"]), _clock(day, s["end"]), s) for day, lst in broadcast_schedule().items()
+                   for s in lst), key=lambda x: x[0])
+    sets = [x for x in sets if x[1] > start + timedelta(minutes=5) and x[0] < end - timedelta(minutes=5)]
+    if not sets:
+        return 0
+    rows = read_tracklist(path)
+    records = [start + timedelta(seconds=int(r["offset_seconds"])) for r in rows
+               if not is_marker(r) and not is_placeholder_spin(r)]
+    keep = [r for r in rows if not str(r.get("show", "")).startswith(("set @", "autocut"))]
+    new = []
+    for t0, _, s in sets:
+        near = [t for t in records if t0 - timedelta(minutes=20) <= t <= t0 + timedelta(minutes=6)]
+        begin = max(near) + timedelta(seconds=90) if near else t0 - timedelta(minutes=1)
+        off = max(0, int((begin - start).total_seconds()))
+        new.append({"offset": fmt_off(off), "clock_time": (start + timedelta(seconds=off)).strftime("%Y-%m-%d %I:%M %p"),
+                    "artist": s["label"], "song": "", "release": "", "show": f"set @ {s['stage']}",
+                    "offset_seconds": off})
+    write_tracklist(path, sorted(keep + new, key=lambda r: int(r["offset_seconds"])))
+    out(f"  {path.name}: {len(new)} set(s) marked at the times on WWOZ's broadcast list")
+    try:
+        add_program_markers(path)              # and the regular shows around the broadcast
+    except Exception as e:
+        out(f"  (the WWOZ shows around it weren't marked: {e})")
+    return len(new)
+
+
+def live_festival(path):
+    """What a festival recorded as it aired noted beside it (its .show.json), else None."""
+    try:
+        info = json.loads(show_info_path(path).read_text(encoding="utf-8"))
+        return info if info.get("recorded_live") and info.get("festival") else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def update_auto_festivals(dest_dir=None):
+    """For each festival WWOZ keeps in its archive and listed set by set on its calendar,
+    a schedule to cut its downloads by (fest-auto-*.json in the data folder), unless a
+    hand-made fest-*.json beside the code already covers it. Called as set lists are
+    read and as festival broadcasts download."""
+    dest_dir = Path(dest_dir) if dest_dir else download_dir_from_config(load_config())
+    hand = _hand_made_festivals()
+    groups = {}
+    downloads = [(p, st) for p in dest_dir.glob("*.mp3") if (st := start_time_from_name(p))]
+    for rec in _saved_set_lists()["events"].values():
+        if not rec.get("sets"):
+            continue
+        a, b = _clock(rec["day"], rec["start"]) - timedelta(hours=2), _clock(rec["day"], rec["end"])
+        hits = [p for p, st in downloads if a <= st < b]
+        places = [pl for p in hits if (pl := festival_named(archive_title(p) or ""))]
+        if not places or any(festival_for(p, hand) for p in hits):
+            continue
+        year = rec["day"][:4]
+        name = rec["title"] if year in rec["title"] else f"{rec['title']} {year}"
+        g = groups.setdefault(loose(name), {
+            "_help": ["Written by WWOZ Studio from WWOZ's broadcast lists, to cut this festival's "
+                      "archive downloads into sets. A hand-made fest-*.json beside the code replaces it."],
+            "name": name, "short": name, "title_match": max(set(places), key=places.count),
+            "place": _clean_place(rec.get("place")), "source": f"WWOZ's broadcast list, {rec.get('url', '')}",
+            "auto": True, "days": {}})
+        g["days"][rec["day"]] = [{"start": s["start"], "end": s["end"], "artist": s["artist"],
+                                  "stage": s.get("stage") or _clean_place(rec.get("place")) or BROADCAST_STAGE}
+                                 for s in rec["sets"]]
+    for key, g in groups.items():
+        p = DATA_DIR / f"fest-auto-{re.sub(r'[^a-z0-9]+', '-', g['name'].lower()).strip('-')}.json"
+        text = json.dumps(g, indent=1, ensure_ascii=False)
+        try:
+            if p.read_text(encoding="utf-8") == text:
+                continue
+        except OSError:
+            pass
+        write_text_atomic(p, text)
+        out(f"  {g['name']}: cut into sets by WWOZ's broadcast list")
+
+
+def _hand_made_festivals():
+    fests = []
+    for p in sorted(SCRIPT_DIR.glob("fest-*.json")):
+        try:
+            fests.append(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+    return fests
+
+
 # ---------------------------------------------------------------- record ---
 
 STREAM_URL = os.environ.get("WWOZ_STREAM_URL") or "https://wwoz-sc.streamguys1.com/wwoz-hi.mp3"  # (tests)
@@ -3094,6 +3422,11 @@ def main():
 
     sub.add_parser("festivals", help="the festival broadcasts on WWOZ's live broadcast calendar, and when "
                                      "this computer records them").set_defaults(fn=cmd_festivals)
+    bs = sub.add_parser("broadcast-sets", help="mark a festival recording's sets at the times on WWOZ's "
+                                               "broadcast list (when the set finder isn't installed)")
+    bs.add_argument("file")
+    bs.set_defaults(fn=lambda a: mark_broadcast_sets(Path(a.file)) or out("No festival list covers that recording."))
+
     fr = sub.add_parser("festival-record", help="record the festival on WWOZ now, if one is (the computer's "
                                                 "schedule runs this)")
     fr.add_argument("--launch", action="store_true", help="start the recording as a program of its own and "

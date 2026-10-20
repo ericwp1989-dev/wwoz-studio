@@ -222,7 +222,7 @@ def name_hints(guide, day, limit=350):
     days = sorted(guide)
     order = [(day, None)] + [(d, (JAZZ_TENT, "Economy Hall Tent")) for d in reversed(days) if d < day]
     for d, stages in order:
-        for s in sorted(guide.get(d, []), key=lambda s: (s["stage"] != JAZZ_TENT, s["start"])):
+        for s in sorted(guide.get(d, []), key=lambda s: (not s.get("on_air") and s["stage"] != JAZZ_TENT, s["start"])):
             if stages and s["stage"] not in stages:
                 continue
             core = re.split(r"\s+(?:featuring|feat\.|ft\.|presents|with special|celebrating)\s+|:",
@@ -272,7 +272,15 @@ def transcribe(path, region, model, hints=None):
 # --------------------------------------------------------------- lineup ---
 
 def load_guide():
-    return wwoz.load_fest_schedule()
+    """Jazz Fest's official schedule and every festival day's broadcast list (the sets
+    marked on_air: what WWOZ aired, see wwoz.festival_guide)."""
+    return wwoz.festival_guide()
+
+
+def on_air_sets(day_sets):
+    """The day's schedule of what was on the air: WWOZ's broadcast list when there is one,
+    else Jazz Fest's Jazz Tent, which WWOZ mostly carries."""
+    return [s for s in day_sets if s.get("on_air")] or [s for s in day_sets if s["stage"] == JAZZ_TENT]
 
 
 def _clock(day, hhmm):
@@ -521,7 +529,10 @@ def autocut(path: Path, start_off=None, end_off=None, transcribe_regions=True, s
         if day:
             # through the evening too (to ~midnight), so post-fest segments get
             # labeled with the WWOZ show that was on the air
-            a = max(0, (_clock(day, "10:45") - file_start).total_seconds())
+            # (Jazz Fest's gates open at 11, whatever WWOZ airs first)
+            first = min([s["start"] for s in on_air_sets(guide[day])]
+                        + (["11:00"] if day in wwoz.load_fest_schedule() else []), default="11:00")
+            a = max(0, (_clock(day, first) - timedelta(minutes=15) - file_start).total_seconds())
             b = min(duration, (_clock(day, "23:59") - file_start).total_seconds())
             if b - a < 600:
                 a, b = 0, duration
@@ -618,6 +629,7 @@ def label_spans(spans, regions, transcripts, guide, day, file_start, spins):
     """Name every music span. Returns dicts: start, end, cut, artist, stage, how, evidence."""
     lineup = Lineup(guide)
     day_sets = guide.get(day, []) if day else []
+    on_air = on_air_sets(day_sets)
     texts = {(t["start_s"], t["end_s"]): t for t in transcripts}
 
     def at(sec):
@@ -738,10 +750,12 @@ def label_spans(spans, regions, transcripts, guide, day, file_start, spins):
         return out
 
     def act_label(key, d, s, kind):
-        name = short_name(lineup.acts[key]["name"])
+        name = s.get("label") or short_name(lineup.acts[key]["name"])
         if s["stage"] == INTERVIEW_STAGE:
             name += " (interview)"
-        if kind == "replay":
+        if s.get("on_air"):
+            pass                   # WWOZ's list already says when it was recorded, if it was
+        elif kind == "replay":
             name += f" (recorded {_clock(d, s['start']):%b} {_clock(d, s['start']).day})"
         elif kind == "earlier":
             name += " (recorded earlier today)"
@@ -809,9 +823,7 @@ def label_spans(spans, regions, transcripts, guide, day, file_start, spins):
 
         # the Jazz Tent set on stage during most of this span, if any
         S = None
-        for s in day_sets:
-            if s["stage"] != JAZZ_TENT:
-                continue
+        for s in on_air:
             s0, s1 = off(_clock(day, s["start"])), off(_clock(day, s["end"]))
             inter = min(b, s1) - max(a, s0)
             if inter > 0.5 * min(b - a, max(1, s1 - s0)):
@@ -862,9 +874,12 @@ def label_spans(spans, regions, transcripts, guide, day, file_start, spins):
                    else "heard in intro" if "intro" in why else "heard in outro")
             cut_t = v["t"]
             evidence = " | ".join(s for s in v["said"] if s)
-        elif S and clock_a < fest_close and not recorded_cue and b - a >= 15 * 60 and not after_hours:
-            artist, stage, how = short_name(clean_name(S[0]["artist"])), JAZZ_TENT, "schedule guess"
-            evidence = "nobody named it on the air; this was on the Jazz Tent schedule"
+        elif (S and clock_a < fest_close and (not recorded_cue or S[0].get("on_air")) and b - a >= 15 * 60
+              and not after_hours):
+            artist = S[0].get("label") or short_name(clean_name(S[0]["artist"]))
+            stage, how = S[0]["stage"], "schedule guess"
+            evidence = ("nobody named it on the air; this was on WWOZ's broadcast list" if S[0].get("on_air")
+                        else "nobody named it on the air; this was on the Jazz Tent schedule")
 
         # studio programming: songs the DJ logged inside a span outside the broadcast
         # (during it the log is unreliable: songs are logged that never aired)
@@ -891,7 +906,8 @@ def label_spans(spans, regions, transcripts, guide, day, file_start, spins):
                 artist, how = "(outside festival broadcast)", "outside fest hours"
         if not artist:
             if in_broadcast and recorded_cue:
-                artist, how = "Jazz Fest recording (not identified)", "unlabeled"
+                fest = next((s["festival"] for s in on_air if s.get("festival")), "Jazz Fest")
+                artist, how = f"{fest} recording (not identified)", "unlabeled"
             elif b - a <= 12 * 60:
                 artist, how = "Between sets", "unlabeled"
             else:
