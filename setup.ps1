@@ -163,16 +163,26 @@ try {
     if ($ff) { Write-Host "   found" } else { WingetInstall "Gyan.FFmpeg" "ffmpeg"; RefreshPath }
 
     Step "Python packages"
-    Run "adding the Python packages WWOZ Studio uses (a minute or two)" {
+    # Into Python's own folder when this person can write to it (a Python installed just for
+    # them, as winget does), so the app finds the packages however it is started; -s keeps
+    # pip from counting copies in the personal folder as installed. Otherwise (a Python
+    # installed for everyone) into the personal folder, which the app also looks in.
+    $own = $false
+    if (HavePython) {
+        $own = ((& py -3.12 -c "import os, sysconfig; print(os.access(sysconfig.get_paths()['purelib'], os.W_OK))") -join "").Trim() -eq "True"
+    }
+    if ($own) { $pip = @("-s", "-m", "pip", "install"); $where = "into Python's own folder" }
+    else { $pip = @("-m", "pip", "install", "--user"); $where = "into your personal Python folder" }
+    Run "adding the Python packages WWOZ Studio uses, $where (a minute or two)" {
         Remove-Item $pipLog -ErrorAction SilentlyContinue      # pip's own log, for a report if it fails
-        & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location --log $pipLog -r "$here\requirements.txt"
+        & py -3.12 @pip --upgrade --disable-pip-version-check --no-warn-script-location --log $pipLog -r "$here\requirements.txt"
         if ($LASTEXITCODE) { throw "pip, Python's package installer, couldn't add the packages (code $LASTEXITCODE). Check the internet connection and run Setup again." }
     }
     $sets = $WithSetDetection -or (Ask "Also install the Jazz Fest set finder? It's about a 2 GB download." $false)
     if ($sets) {
         Run "adding the set finder's packages (about 2 GB; this takes a while)" {
             Remove-Item $pipLog -ErrorAction SilentlyContinue
-            & py -3.12 -m pip install --user --upgrade --disable-pip-version-check --no-warn-script-location --log $pipLog -r "$here\requirements-sets.txt"
+            & py -3.12 @pip --upgrade --disable-pip-version-check --no-warn-script-location --log $pipLog -r "$here\requirements-sets.txt"
             if ($LASTEXITCODE) { throw "pip couldn't add the set finder (code $LASTEXITCODE). Check the internet connection and run Setup again." }
         }
     } else { Write-Host "   set finder skipped (run Setup again to add it later)" }

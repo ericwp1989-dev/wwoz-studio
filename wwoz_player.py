@@ -81,6 +81,25 @@ def is_vbr_mp3(path):
         return False
 
 
+def see_personal_packages():
+    """Add Python's personal package folder (%APPDATA%\\Python\\Python312\\site-packages
+    on Windows) to the search path if Python left it out. Setup used to install the
+    packages there (pip --user), and a program started without the usual settings (no
+    APPDATA, say) doesn't look there: the window opened, but the sound couldn't load."""
+    import site
+    folders = []
+    try:
+        folders.append(site.getusersitepackages())
+    except Exception:
+        pass
+    if os.name == "nt":
+        v = f"Python{sys.version_info[0]}{sys.version_info[1]}"
+        folders.append(str(Path.home() / "AppData" / "Roaming" / "Python" / v / "site-packages"))
+    for d in folders:
+        if d and os.path.isdir(d) and d not in sys.path:
+            site.addsitedir(d)
+
+
 def drain(pipe, keep):
     """Read a program's messages as they come, keeping the last few. Left unread, the
     pipe (4 KB on Windows) fills after a few dozen error lines from a damaged file or a
@@ -408,6 +427,7 @@ def serve(ffmpeg, ffprobe):
     If the sound output can't be opened (speakers asleep, unplugged or busy with
     another program), it tries again every two seconds and whenever a recording is
     played, and writes why to stderr, which the app sends to its error log."""
+    see_personal_packages()            # miniaudio may be in the personal folder (see there)
     out_lock = threading.Lock()
     eng_lock = threading.Lock()
     status = {"ack": 0}
@@ -424,10 +444,12 @@ def serve(ffmpeg, ffprobe):
                     if have["said"]:
                         print(f"{time.ctime()}  sound player: the sound output opened after all",
                               file=sys.stderr, flush=True)
-                except ImportError:
+                except ImportError as e:
                     setup = "Setup (Mac).command" if sys.platform == "darwin" else "Setup.cmd"
-                    have["problem"] = (f"the miniaudio package that plays the sound isn't installed. "
-                                       f"Double-click {setup} in the program's folder to add it.")
+                    have["problem"] = (f"the miniaudio package that plays the sound couldn't be loaded "
+                                       f"({e}). Double-click {setup} in the program's folder to "
+                                       f"install it again.")
+                    have["detail"] = f"Python {sys.executable}; search path {sys.path}"
                     have["next_try"] = float("inf")
                 except Exception as e:
                     have["problem"] = ("the computer's speakers or headphones wouldn't open. Check that "

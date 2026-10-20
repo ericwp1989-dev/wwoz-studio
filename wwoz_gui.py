@@ -77,8 +77,9 @@ def cannot_start(exc, log=None):
 
 
 try:
-    import wwoz  # the CLI module, reused as a library
     import wwoz_player  # the sound: ffmpeg and miniaudio in a helper process
+    wwoz_player.see_personal_packages()   # packages a pip --user install put out of Python's sight
+    import wwoz  # the CLI module, reused as a library
 except Exception as _e:
     cannot_start(_e)
 
@@ -1589,7 +1590,7 @@ class App(tk.Tk):
         if p.state == "error" and p.error and p.error != said:
             self.logln(f"sound player: {p.error}")
             said = p.error
-            if "isn't installed" in p.error:
+            if "couldn't be loaded" in p.error:
                 messagebox.showerror(APP, f"Recordings can't play yet.\n\n{p.error}")
                 return
         if tries < 60:                                   # keep looking for two minutes

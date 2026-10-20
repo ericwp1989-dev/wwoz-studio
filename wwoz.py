@@ -36,7 +36,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import requests
+try:
+    import requests
+except ImportError:          # in Python's personal package folder, which it left out (see there)
+    import wwoz_player
+    wwoz_player.see_personal_packages()
+    import requests
 
 TZ = ZoneInfo("America/Chicago")  # WWOZ local time; recordings assumed made on a Central-time PC
 NOWIN = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # no console flash from GUI
