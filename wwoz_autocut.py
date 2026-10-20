@@ -1054,11 +1054,17 @@ def write_rows(path, rows, labeled, start_off, end_off, file_start, day):
     and songs logged in the middle of a live set (they were not aired — checked by
     fingerprinting: the audio there is the band on stage)."""
     live = [s for s in labeled if s.get("in_broadcast") and s["stage"]]
+    # a show change the station calendar gave inside a festival broadcast is not what aired
+    # (an older version marked them on festival days it didn't know)
+    hours = [((a - file_start).total_seconds(), (b - file_start).total_seconds())
+             for _, a, b in wwoz.festival_hours(file_start, file_start + timedelta(seconds=end_off))] if file_start else []
     keep = []
     for r in rows:
         o = int(r["offset_seconds"])
         show = str(r.get("show", ""))
         if start_off <= o <= end_off and show.startswith(("set @", "autocut")):
+            continue
+        if show == "WWOZ program" and any(a - 300 <= o < b - 60 for a, b in hours):
             continue
         if wwoz.is_placeholder_spin(r):
             continue
