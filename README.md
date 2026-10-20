@@ -152,11 +152,12 @@ the air (and it matches the schedule), they named it once, the name comes from t
 schedule because nobody said it (worth a listen), or nobody named it at all. The DJ
 transcripts behind each name are kept in the recording's `.autocut.json`.
 
-To have a festival cut into sets, the app needs its set times in a `fest-*.json` beside
-the code (`fest-bluesbbq-2026.json` holds the 2026 Crescent City Blues & BBQ Festival):
-copy it, then change the name, the words that appear in the archive's titles of the
-broadcasts, and the sets. The app then cuts that festival's downloads on its own, even
-ones it downloaded before the file was there.
+Festival schedules live in the `schedules` folder (see "New festival schedules come on
+their own" below). A `fest-*.json` there holds a festival's set times for cutting its
+archive downloads (`fest-bluesbbq-2026.json` holds the 2026 Crescent City Blues & BBQ
+Festival); the app now writes one itself from WWOZ's lists, so hand-made ones are rarely
+needed. The app cuts a festival's downloads on its own as soon as it has its set times,
+even ones it downloaded before.
 
 ## Festivals, on their own
 
@@ -226,12 +227,30 @@ with the calendar, as long as the festival is still to come. Then:
   (recorded Apr 30)".
 
 Some schedules come only as a picture. Festing in Place 2026 (October 22 to 25: past
-festival sets from the Jazz & Heritage Foundation's archive) is one, so its 60 sets are
-typed into the program, from the grid WWOZ posted, in `broadcast-festing-in-place-2026.json`;
-each set's name says where it was recorded, as in "Allen Toussaint (Jazz Fest 2005)".
-Only each day's last start time is printed on the grid, so the others are measured from
-it, and WWOZ itself says all its times are approximate; the set finder corrects them from
-the DJs' introductions.
+festival sets from the Jazz & Heritage Foundation's archive) is one; its 60 sets are in
+`schedules/broadcast-festing-in-place-2026.json`, each named for where it was recorded, as
+in "Allen Toussaint (Jazz Fest 2005)". Only each day's last start time is printed on the
+grid, so the others are placed by where each set sits in it, and WWOZ itself says all its
+times are approximate; the set finder corrects them from the DJs' introductions.
+
+### New festival schedules come on their own
+
+Nobody has to download the program again to get a new festival's schedule. A small robot
+on this GitHub page (a free GitHub workflow, `.github/workflows/festival-schedules.yml`)
+runs every morning and keeps the `schedules` folder up to date:
+
+- it reads WWOZ's festival calendar and saves each festival day's set list;
+- when WWOZ posts a schedule only as a picture, it reads the picture with Tesseract, a
+  free text-recognition program (on Festing in Place 2026 it read all 60 sets the same
+  as they were typed in, and every start within 3 minutes);
+- once Jazz Fest posts its official schedule for the coming festival (usually in March),
+  it saves that too, for the set finder.
+
+It saves only what passes its checks. A picture it can't read reliably opens an issue on
+this page instead, asking for the schedule to be typed in. Every copy of WWOZ Studio
+looks at the folder every few hours, with the festival calendar, and fetches what is new
+or changed into Documents\WWOZ Studio\schedules. Each change the robot makes shows on
+this page as a commit by "WWOZ Studio schedule robot".
 
 A festival with no list at all, from WWOZ or typed in, isn't cut into sets: a recording
 stays whole, and archive downloads are listed under the festival day by day, each named
@@ -283,7 +302,9 @@ recordings' log is `festival-recording.log`, and the schedule's definition is sa
 `festival-recording-task.xml` (or `festival-recording.plist` on a Mac), all in
 Documents\WWOZ Studio. The festivals' set lists are saved in `festival_sets.json` there,
 and a festival in the archive cut by WWOZ's list gets a `fest-auto-*.json` beside it;
-`broadcast-*.json` beside the code holds a list typed in from a picture.
+the schedules fetched from this page are in its `schedules` folder. The robot is
+`ci/find_schedules.py` (`python ci/find_schedules.py schedules --dry-run` shows what it
+would change), and `ci/read_grid.py` its picture reader.
 `wwoz.py broadcast-sets FILE` marks a recording's sets at the listed times, and
 `wwoz.py autocut FILE` runs the set finder on it.)
 Errors the app runs into are written to `wwoz_studio_errors.log` in Documents\WWOZ Studio,
@@ -297,7 +318,7 @@ its own, so nothing else the app is doing can make it skip.
 Files produced per recording: `.tracklist.csv` (spreadsheet), `.cue` (VLC/foobar2000
 can use it to show chapters), `.shazam.csv` (fingerprint results).
 `py -3.12 batch_autocut.py --split` relabels and re-splits every festival day in
-one go. The festival schedule lives in `jazzfest2026_sets.json`; for another year,
+one go. The festival schedule lives in `schedules/jazzfest2026_sets.json`; for another year,
 download that year's "8-day cubes" PDF from nojazzfest.com/downloads and run
 `py -3.12 parse_jazzfest_schedule.py <pdf>` (re-download it after the festival: it
 is revised when days are cut short).
