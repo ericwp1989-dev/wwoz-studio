@@ -111,15 +111,25 @@ def drain(pipe, keep):
         pass
 
 
-def open_device(miniaudio, period_ms):
+def open_device(miniaudio, period_ms, notify=None):
     """The speakers, through miniaudio, which makes a "context" (with a thread of its
     own) for every device and never frees it: each retry while the speakers were
     unplugged left a thread behind. So the context is kept here and freed with the
-    device, or at once when the device won't open."""
+    device, or at once when the device won't open. `notify` is told what the system
+    does to the output (stopped it, moved it to another device), on miniaudio's thread.
+
+    WWOZ_SPEAKERS_FAIL_UNTIL (a time, seconds since 1970) makes the speakers refuse to
+    open until then: the tests use it to act out headphones that aren't connected yet."""
+    if time.time() < float(os.environ.get("WWOZ_SPEAKERS_FAIL_UNTIL") or 0):
+        raise RuntimeError("the speakers are unavailable (WWOZ_SPEAKERS_FAIL_UNTIL)")
     made = []
 
     class Device(miniaudio.PlaybackDevice):
         def _make_context(self, *args, **kw):
+            if notify:
+                self._notify = miniaudio.ffi.callback("ma_device_notification_proc",
+                                                      lambda n: notify(n.type))
+                self._devconfig.notificationCallback = self._notify
             made.append(super()._make_context(*args, **kw))
             return made[-1]
     try:
@@ -129,6 +139,10 @@ def open_device(miniaudio, period_ms):
         for ctx in made:
             miniaudio.lib.ma_context_uninit(ctx)
         raise
+
+
+NOTIFICATIONS = {0: "started", 1: "stopped", 2: "rerouted", 3: "interruption began",
+                 4: "interruption ended"}       # ma_device_notification_type_*
 
 
 # ------------------------------------------------------------------- engine --
@@ -141,9 +155,11 @@ class Engine:
     the speakers need it, so the clock is the label on the sound just played and stays
     right after a jump."""
 
-    def __init__(self, ffmpeg, ffprobe, period_ms=50, buffer_sec=2.0):
+    def __init__(self, ffmpeg, ffprobe, period_ms=50, buffer_sec=2.0, log=None):
         import miniaudio
         self.ffmpeg, self.ffprobe = ffmpeg, ffprobe
+        self.log = log or (lambda msg: None)   # a line for the error log
+        self._miniaudio, self._period_ms = miniaudio, period_ms
         self.volume = 1.0           # 0 to 1
         self.state = "stopped"      # stopped, playing, paused, ended, error
         self.error = ""
@@ -167,7 +183,12 @@ class Engine:
         self._live_proc = None
         self._last_err = ""         # ffmpeg's last word on a stream connection that ended
         self._lib = miniaudio.lib
-        self.device, self._context = open_device(miniaudio, period_ms)
+        self._notes = collections.deque()    # what the system did to the output, to log
+        self._stopped_at = 0.0               # when we last stopped the output ourselves
+        self._fed_at = time.time()           # when the speakers last asked for sound
+        self._dev_lost = False               # the output couldn't be opened again (yet)
+        self._dev_retry_at = 0.0
+        self.device, self._context = self._open_output()
         self.backend = self.device.backend
         self._feed = self._feeder()
         next(self._feed)
@@ -175,22 +196,102 @@ class Engine:
         # output keeps the computer from going to sleep, even when all it plays is silence.
         self._dev_lock = threading.Lock()
 
+    def _open_output(self):
+        return open_device(self._miniaudio, self._period_ms, notify=self._notes.append)
+
+    def _started(self):
+        """Whether the output is really running: miniaudio's own word, not the Python
+        wrapper's flag, which stays "running" after the system stops a device (the
+        speakers unplugged, the sound engine restarted, another output taking over)."""
+        return self.device is not None and bool(self._lib.ma_device_is_started(self.device._device))
+
+    def _say_notes(self):
+        """Log what the system did to the output (called with the device lock held). A
+        "stopped" notice within two seconds of a stop of our own is that stop: on a Mac,
+        Core Audio delivers it after the stop call has returned."""
+        while self._notes:
+            kind = NOTIFICATIONS.get(self._notes.popleft(), "?")
+            if kind == "started" or (kind == "stopped" and (time.time() - self._stopped_at < 2
+                                                           or self.state != "playing")):
+                continue                                  # our own doing
+            self.log(f"the sound output was {kind} by the system"
+                     + (" (opening it again)" if kind == "stopped" and self.state == "playing" else ""))
+
+    def _reopen_output(self, why):
+        """Close the output and open it afresh (with the lock held). False if it won't
+        open now; sync_device tries again every two seconds while something should play."""
+        self.log(f"{why}; opening the sound output again")
+        old, self.device = self.device, None
+        if old is not None:
+            try:
+                self._stopped_at = time.time()
+                old.close()
+            except Exception:
+                pass
+            try:
+                self._lib.ma_context_uninit(self._context)
+            except Exception:
+                pass
+        try:
+            self.device, self._context = self._open_output()
+        except Exception as e:
+            self.log(f"the sound output wouldn't open ({e!r}); trying again every two seconds")
+            self._dev_lost, self._dev_retry_at = True, time.time() + 2
+            return False
+        self._dev_lost = False
+        return True
+
     def sync_device(self):
         """Start the speakers when there is something to play and stop them when there
-        isn't (paused, stopped, at the end, or an error)."""
+        isn't (paused, stopped, at the end, or an error). If the system stopped the
+        output, or it runs but has stopped asking for sound (an output that went away
+        under it), it is opened again; while it won't open, "error" is reported and
+        it is tried again every two seconds, and the show carries on where it was."""
         with self._dev_lock:
-            want = self.state == "playing"
-            if want and not self.device.running:
-                try:
-                    self.device.start(self._feed)
-                except Exception as e:
-                    self.error = f"the speakers or headphones wouldn't start ({e})"
-                    self.state = "error"
-            elif not want and self.device.running:
-                try:
-                    self.device.stop()
-                except Exception:
-                    pass
+            self._say_notes()
+            want = self.state == "playing" or (self._dev_lost and self.state == "error")
+            if not want:
+                if self._started():
+                    try:
+                        self._stopped_at = time.time()
+                        self.device.stop()
+                    except Exception:
+                        pass
+                return
+            if self._dev_lost:
+                if time.time() < self._dev_retry_at:
+                    return
+                if not self._reopen_output("the sound output is still missing"):
+                    return
+                self.state, self.error = "playing", ""
+                self.log("the sound output opened after all; playing on")
+            elif self._started():
+                if time.time() - self._fed_at < 3:
+                    return                                    # all well
+                if not self._reopen_output("the sound output stopped taking sound"):
+                    self.error, self.state = self._lost_message(), "error"
+                    return
+            elif self.device is not None and self.device.running:
+                # the system stopped it (miniaudio's wrapper didn't notice): start it again
+                self.device.running, self.device.callback_generator = False, None
+            try:
+                self.device.start(self._feed)
+                self._fed_at = time.time()
+            except Exception as e:
+                if self._reopen_output(f"the sound output wouldn't start ({e})"):
+                    try:
+                        self.device.start(self._feed)
+                        self._fed_at = time.time()
+                        return
+                    except Exception as e2:
+                        self.log(f"the sound output wouldn't start after reopening ({e2})")
+                        self._dev_lost, self._dev_retry_at = True, time.time() + 2
+                self.error, self.state = self._lost_message(), "error"
+
+    @staticmethod
+    def _lost_message():
+        return ("the computer's speakers or headphones stopped working or went away. Check that "
+                "they're on and connected; WWOZ Studio keeps trying, and carries on where it was.")
 
     def open(self, source, live=False, start=0.0):
         """Play a file (from `start` seconds) or a web stream from the top."""
@@ -198,6 +299,7 @@ class Engine:
             self._gen += 1
             gen = self._gen
             self._reset(0.0 if live else start, prebuffer=1.0 if live else 0.25)
+        self._end_live()
         self.live, self.error, self.duration = live, "", 0.0
         self._got_at, self._heard, self._last_err = time.time(), False, ""
         self.state = "playing"
@@ -229,7 +331,15 @@ class Engine:
         with self._lock:
             self._gen += 1
             self._reset(0.0, prebuffer=0)
+        self._end_live()
         self.state = "stopped"
+
+    def _end_live(self):
+        """End a live stream's ffmpeg now. Left alone, it would keep reconnecting until
+        the stream next sent sound, which during an outage can be a long time."""
+        proc, self._live_proc = self._live_proc, None
+        if proc:
+            proc.kill()
 
     def check_live(self):
         """Give up on a live stream that has sent nothing for a while, and say so: with
@@ -253,8 +363,12 @@ class Engine:
 
     def close(self):
         self.stop()
-        self.device.close()
-        self._lib.ma_context_uninit(self._context)
+        if self.device is not None:
+            try:
+                self.device.close()
+            except Exception:
+                pass
+            self._lib.ma_context_uninit(self._context)
 
     @property
     def position(self):
@@ -266,6 +380,7 @@ class Engine:
         self._chunks.clear()
         self._bytes = 0
         self._eof = False
+        self._seek = None
         self._pos = pos
         self._filling = True
         self._prebuffer = int(prebuffer * RATE) * FRAME_BYTES
@@ -275,6 +390,7 @@ class Engine:
         """miniaudio's side: hand over the next `frames` of sound, or silence."""
         frames = yield b""
         while True:
+            self._fed_at = time.time()
             out = self._take(frames * FRAME_BYTES) if self.state == "playing" else b""
             frames = yield out
 
@@ -431,19 +547,27 @@ def serve(ffmpeg, ffprobe):
     out_lock = threading.Lock()
     eng_lock = threading.Lock()
     status = {"ack": 0}
-    have = {"eng": None, "problem": "", "next_try": 0.0, "volume": 1.0, "said": ""}
+    have = {"eng": None, "problem": "", "next_try": 0.0, "volume": 1.0, "said": "", "pending": None}
+
+    def log(msg):
+        print(f"{time.ctime()}  sound player: {msg}", file=sys.stderr, flush=True)
 
     def engine(now=False):
-        """The engine, opening the sound output first if it isn't open yet."""
+        """The engine, opening the sound output first if it isn't open yet. A show asked
+        for while the output couldn't open (`pending`) is started as soon as it does."""
         with eng_lock:
             if have["eng"] is None and (now or time.time() >= have["next_try"]):
                 try:
-                    have["eng"] = Engine(ffmpeg, ffprobe)
+                    have["eng"] = Engine(ffmpeg, ffprobe, log=log)
                     have["eng"].volume = have["volume"]
                     have["problem"] = ""
                     if have["said"]:
-                        print(f"{time.ctime()}  sound player: the sound output opened after all",
-                              file=sys.stderr, flush=True)
+                        log("the sound output opened after all")
+                    cmd, have["pending"] = have["pending"], None
+                    if cmd:
+                        log("playing what was asked for while it was shut")
+                        have["eng"].open(cmd["source"], live=cmd.get("live", False), start=cmd.get("start", 0.0))
+                        have["eng"].sync_device()
                 except ImportError as e:
                     setup = "Setup (Mac).command" if sys.platform == "darwin" else "Setup.cmd"
                     have["problem"] = (f"the miniaudio package that plays the sound couldn't be loaded "
@@ -458,8 +582,7 @@ def serve(ffmpeg, ffprobe):
                     have["next_try"] = time.time() + 2
                 if have["problem"] and have["problem"] != have["said"]:
                     have["said"] = have["problem"]                # say each new problem once
-                    print(f"{time.ctime()}  sound player: {have['problem']} ({have.get('detail', '')})",
-                          file=sys.stderr, flush=True)
+                    log(f"{have['problem']} ({have.get('detail', '')})")
             return have["eng"]
 
     def report():
@@ -477,15 +600,18 @@ def serve(ffmpeg, ffprobe):
             except (OSError, ValueError):
                 os._exit(0)                               # the app has gone
 
+    ending = threading.Event()
+
     def ticker():
-        while True:
+        while not ending.is_set():
             eng = have["eng"]
             if eng:
                 eng.check_live()
                 eng.sync_device()                         # speakers off once a show ends or fails
             report()
-            time.sleep(0.1 if eng and eng.state == "playing" else 0.5)
-    threading.Thread(target=ticker, daemon=True).start()
+            ending.wait(0.1 if eng and eng.state == "playing" else 0.5)
+    tick = threading.Thread(target=ticker, daemon=True)
+    tick.start()
 
     for line in sys.stdin:
         try:
@@ -498,6 +624,10 @@ def serve(ffmpeg, ffprobe):
         if do == "volume":
             have["volume"] = max(0.0, min(1.0, float(cmd["value"])))
         eng = engine(now=do in ("open", "play"))         # pressing play tries the speakers again
+        if eng is None and do == "open":
+            have["pending"] = cmd                         # played once the speakers open
+        elif eng is None and do == "stop":
+            have["pending"] = None
         if eng:
             if do == "open":
                 eng.open(cmd["source"], live=cmd.get("live", False), start=cmd.get("start", 0.0))
@@ -514,8 +644,18 @@ def serve(ffmpeg, ffprobe):
             eng.sync_device()                             # speakers on to play, off when not
         status["ack"] = cmd.get("id", status["ack"])
         report()
+    # end the status thread first: a daemon thread still writing to stdout while Python
+    # shuts down is reported as a "Fatal Python error" in the error log at every close
+    ending.set()
+    tick.join(timeout=2)
     if have["eng"]:
         have["eng"].close()
+    with out_lock:
+        try:
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+    os._exit(0)                        # nothing left to tidy; skips a flush the app isn't reading
 
 
 # -------------------------------------------------------------- the app's side --

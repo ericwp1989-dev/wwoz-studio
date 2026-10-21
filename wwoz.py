@@ -1186,7 +1186,7 @@ async def identify_async(path: Path, interval, clip, start_off, duration, csv_su
     out(f"  scanning {path.name}: {fmt_off(start_off)} -> {fmt_off(end)} "
         f"every {interval}s ({int((end - start_off) // interval)} samples)")
 
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         wav = Path(td) / "clip.wav"
         offset = start_off
         while offset < end:
@@ -2111,7 +2111,7 @@ def cut_festival(fest, dest_dir=None):
                 "-metadata", f"date={s['day']}",
                 "-metadata", f"comment=Scheduled {s['start']}-{s['end']}, cut by the schedule "
                              f"and the DJs' log, so it may start or end a little off."]
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             parts, failed = [], ""
             for k, (x, y, p, w0) in enumerate(pieces):
                 part = Path(tmp) / f"{k}.mp3"

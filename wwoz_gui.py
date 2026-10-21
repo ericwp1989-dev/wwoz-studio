@@ -392,6 +392,7 @@ class App(tk.Tk):
 
         # background work (see _next_job): one job at a time, Shazam only while nothing plays
         self.job_text = ""
+        self._job_key = None           # the background job under way (see _on_close)
         self._job_done = set()
         self._job_tried = {}        # when a song list was last fetched (see _next_job)
         self._job_proc = None
@@ -447,7 +448,7 @@ class App(tk.Tk):
                        command=lambda: wwoz_report and wwoz_report.set_enabled(self.report_var.get()),
                        background=SLATE, foreground=CHALK, activebackground=SLATE,
                        activeforeground=GOLD_HI, selectcolor=SLATE, highlightthickness=0, bd=0,
-                       font=FONT_SM, cursor="hand2").pack(side="right")
+                       font=FONT_SM, cursor="hand2", takefocus=0).pack(side="right")
         self.log = tk.Text(logf, height=2 if self.compact else 4, wrap="word", state="disabled", relief="flat",
                            background=SLATE, foreground=CHALK, insertbackground=CHALK,
                            highlightthickness=0, padx=12, pady=4, font=FONT_LOG)
@@ -673,13 +674,14 @@ class App(tk.Tk):
             ttk.Label(ctrl, text="Volume", style="Meta.TLabel").pack(side="left", padx=(28, 6))
         self.vol = tk.IntVar(value=int(self.state.get("_volume", 90)))
         ttk.Scale(ctrl, from_=0, to=100, variable=self.vol, length=px(70 if self.compact else 110),
-                  command=lambda v: self.player and
+                  takefocus=0, command=lambda v: self.player and
                   self.player.set_volume(float(v) / 100)).pack(side="left")
 
         seekf = ttk.Frame(head, style="Panel.TFrame")
         seekf.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         self.pos_var = tk.DoubleVar()
-        self.seek = ttk.Scale(seekf, from_=0, to=1000, variable=self.pos_var, command=self._seek_drag)
+        self.seek = ttk.Scale(seekf, from_=0, to=1000, variable=self.pos_var, command=self._seek_drag,
+                              takefocus=0)                # Space and the arrows stay the player's
         self.seek.pack(side="left", fill="x", expand=True)
         # click anywhere on the bar to go there, or drag
         self.seek.bind("<ButtonPress-1>", self._seek_at)
@@ -1121,7 +1123,7 @@ class App(tk.Tk):
         # the festivals WWOZ carries live, downloaded with no favorite needed (wwoz.festival_picks)
         self.fest_var = tk.BooleanVar(value=wwoz.auto_festivals_on(wwoz.load_config()))
         ttk.Checkbutton(t, text="Also get the festivals WWOZ broadcasts live, on their own",
-                        variable=self.fest_var, command=self._fest_toggled).pack(anchor="w", padx=10)
+                        variable=self.fest_var, command=self._fest_toggled, takefocus=0).pack(anchor="w", padx=10)
         self.fest_hint = ttk.Label(t, text="", style="Hint.TLabel", justify="left", wraplength=px(1120))
         self.fest_hint.pack(anchor="w", padx=(32, 10), pady=(0, 8))
         self._show_fest_hint()
@@ -1744,9 +1746,15 @@ class App(tk.Tk):
             self.player.stop() if self.live else self.player.pause()   # a live stream can't pause
             self.play_btn.config(text="Play")
         else:
-            if self.live and self.player.state == "stopped":
-                self._play_error_said = ""
+            self._play_error_said = ""
+            if self.live and self.player.state in ("stopped", "error"):
                 self.player.open_stream(wwoz.STREAM_URL)               # start it again
+            elif self.current_file and self.player.state in ("stopped", "error"):
+                # after an error (or a stop) the helper has nothing open: open the show
+                # again where it was, rather than send a Play it would ignore
+                pos = self.player.position
+                self.player.open(self.current_file, start=pos if pos > 5 else 0)
+                self.logln(f"playing {self.current_file.stem} again" + (f" from {fmt(pos)}" if pos > 5 else ""))
             else:
                 self.player.play()
             self.play_btn.config(text="Pause")
@@ -1762,6 +1770,9 @@ class App(tk.Tk):
         """Space plays or pauses; the arrows skip 30 s (5 min with Shift). Typing in a
         search box or the marker fields is left alone."""
         typing = (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, tk.Spinbox)
+        # widgets whose own key binding runs as well (ours runs after it and can't stop it)
+        pressable = (ttk.Button, tk.Button, ttk.Checkbutton, tk.Checkbutton, ttk.Radiobutton, tk.Radiobutton)
+        sliders = (ttk.Scale, tk.Scale)
 
         def guard(fn):
             def handler(e):
@@ -1769,7 +1780,9 @@ class App(tk.Tk):
                     w = self.focus_get()
                 except (KeyError, tk.TclError):      # focus in a combobox's drop-down
                     return None
-                if isinstance(w, typing) or isinstance(w, (ttk.Button, tk.Button)) and e.keysym == "space":
+                if isinstance(w, typing) or isinstance(w, pressable) and e.keysym == "space":
+                    return None
+                if isinstance(w, sliders) and e.keysym in ("Left", "Right"):
                     return None
                 if isinstance(w, tk.Toplevel) and w is not self:
                     return None
@@ -1835,8 +1848,13 @@ class App(tk.Tk):
             sec = max(0, self.player.position)
             self.pos_var.set(sec / self.duration * 1000)
             self.time_lbl.config(text=f"{fmt(sec)} / {fmt(self.duration)}")
-            if int(sec) % 10 == 0 and sec > 30:
-                self.state[str(self.current_file)] = int(sec)
+            key = str(self.current_file)
+            if self.player.state == "ended":           # heard to the end: nothing to resume
+                if self.state.pop(key, None) is not None:
+                    save_state(self.state)
+                self.resume_btn.grid_remove()
+            elif int(sec) % 10 == 0 and sec > 30 and self.state.get(key) != int(sec):
+                self.state[key] = int(sec)
                 save_state(self.state)
             now_iid = None
             for i, r in enumerate(self.rows):
@@ -2077,7 +2095,8 @@ class App(tk.Tk):
         row.pack(fill="x")
         entry = {"kind": kind, "match": match, "day": day, "start": start,
                  "var": var, "label": None, "slot": slot}
-        ttk.Checkbutton(row, variable=var, command=lambda en=entry: self._fav_toggled(en))            .pack(side="left")
+        ttk.Checkbutton(row, variable=var, command=lambda en=entry: self._fav_toggled(en),
+                        takefocus=0).pack(side="left")
         lbl = tk.Label(row, text=text, anchor="w", cursor="hand2", padx=4, background=BG,
                        foreground=INK, font=FONT)
         lbl.pack(side="left", fill="x", expand=True)
@@ -2439,7 +2458,7 @@ class App(tk.Tk):
                 continue
             idle = 0
             label, fn, key = job
-            self.job_text = label
+            self.job_text, self._job_key = label, key
             if key[1] not in ("festival-check", "festival-calendar"):   # regular looks: they speak
                 self.logln(f"on its own: {label}")                      # only when they find some
             try:
@@ -2458,7 +2477,7 @@ class App(tk.Tk):
                 elif key[1] in ("shazam", "programs"):
                     self._job_done.add(key)            # once a session is enough
             finally:
-                self.job_text = ""
+                self.job_text, self._job_key = "", None
                 self._job_proc = None
                 self.scan_now = None
             self.after(0, self._after_job)
@@ -2613,19 +2632,22 @@ class App(tk.Tk):
             self.rec_stop.set()
             self._rec_done.wait(timeout=5)
         proc = self._job_proc
-        if proc and proc.poll() is None:
+        key = self._job_key
+        cutting = key is not None and key[1] in ("cut", "festival")   # a cut ffmpeg is in the middle of
+        if (proc and proc.poll() is None) or cutting:
             if not messagebox.askyesno(
                     APP, f"The app is {self.job_text or 'finding sets'} in the background. Closing stops "
                          "it, and it starts over the next time the app is open.\n\nClose anyway?"):
                 return
-            proc.kill()
+            if proc and proc.poll() is None:
+                proc.kill()
         self._closing = True
         self.state["_volume"] = int(self.vol.get())
         if self.scan_now:
             wwoz.shazam_lock(self.scan_now).unlink(missing_ok=True)
         if self.player and self.current_file:
             sec = self.player.position
-            if sec > 30:
+            if sec > 30 and self.player.state != "ended":
                 self.state[str(self.current_file)] = int(sec)
         save_state(self.state)
         if self.player:
